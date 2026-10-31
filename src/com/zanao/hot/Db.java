@@ -465,10 +465,11 @@ public class Db extends SQLiteOpenHelper {
         public int contentChanged = 0;
         public int count = 0;
         public long minPostedAt = Long.MAX_VALUE;
+        public long maxPostedAt = 0;
     }
 
     /**
-     * 落一页 /thread/v2/list 的结果。
+     * 落一页 /thread/search（时间流）的结果。
      * 关键：同一个 thread_id 只保留一行，不再按期复制。
      */
     public FeedResult saveFeedPage(long ts, JSONArray list) {
@@ -489,6 +490,7 @@ public class Db extends SQLiteOpenHelper {
                 } catch (Exception ignore) {
                 }
                 if (pt > 0 && pt < r.minPostedAt) r.minPostedAt = pt;
+                if (pt > r.maxPostedAt) r.maxPostedAt = pt;
 
                 String title = t.optString("title");
                 String content = t.optString("content");
@@ -522,7 +524,8 @@ public class Db extends SQLiteOpenHelper {
                 ContentValues v = new ContentValues();
                 v.put("thread_id", tid);
                 v.put("last_seen", ts);
-                v.put("title", title);
+                // 纯图帖的 title 在源数据里就是空串：别用空串冲掉 info 拉到的标题
+                if (title.length() > 0 || !exists) v.put("title", title);
                 v.put("nickname", t.optString("nickname"));
                 v.put("headimgurl", t.optString("headimgurl"));
                 v.put("cate_name", t.optString("cate_name"));
@@ -530,7 +533,10 @@ public class Db extends SQLiteOpenHelper {
                 v.put("c_count", cCount);
                 v.put("l_count", lCount);
                 v.put("user_level", t.optString("user_level"));
-                v.put("is_anon", t.optBoolean("is_anon") ? 1 : 0);
+                // /thread/search 的 item 不带 is_anon（v2/list 才带）：字段缺失时别把旧值冲成 0
+                if (t.has("is_anon")) {
+                    v.put("is_anon", t.optBoolean("is_anon") ? 1 : 0);
+                }
                 if (pt > 0) v.put("posted_at", pt);
 
                 // 正文：只在非空且确实变了时才写，并先留旧版

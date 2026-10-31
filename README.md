@@ -10,15 +10,16 @@
 
 | 功能 | 说明 |
 |---|---|
-| 时间流抓取 | `/thread/v2/list` 按 `from_time` 往前翻，最多回溯 **47.9 小时**（接口硬窗口），逐页入库 |
+| 时间流抓取 | `/thread/search` 按 `end_time` 往前翻，最多回溯 **47 小时**（接口硬窗口），逐页入库 |
 | 热榜名次 | `/thread/hot` top 10 只在**名次变化时**记一行（`rank_event`），列表里显示「榜N」角标 |
 | 帖子存档 | 正文、作者、发帖时间、帖内图片、原帖短链、浏览/赞/收藏 |
 | 正文版本化 | 正文 md5 变了才留旧版（`thread_detail_snap`），作者编辑后旧正文不丢 |
 | 评论存档 | 全量一级评论 + 楼中楼（`root_comment_id` 挂载，缩进显示） |
 | 评论原话留存 | 评论被删时**先把原话存进 `comment_content_snap` 再覆盖**，界面上紫底显示「（原话）」 |
 | 图片本地化 | 帖图 + 评论图 + 头像全部下载到 `files/img/`，**按图片内容 md5 命名**（同图不同 URL 只存一份），落盘一律 `@!sm_w400` 缩略图 |
-| 增量刷新 | 老帖只在评论数涨了才拉评论；新帖才拉 info；正文没变不重写 |
-| 断点回填 | 增量翻满页数上限时把游标写进 `meta.backfill_cursor`，下一轮从断点继续往更早补，直到 47.9h 窗口边界 |
+| 手动刷新 | 只跑**增量段**（从最新往回翻到干净页就停），通常 4~10 页、几秒到几十秒 |
+| 断点回填 | 首次装机时增量翻满页数上限还没碰到干净页，就把游标写进 `meta.backfill_cursor`，把 47h 历史一次性补齐，做完置 0 不再启动 |
+| 滚动复查 | 定时任务才跑：老帖评论只增不减，用 `meta.refresh_cursor` 每轮花 3 分钟往回刷一段，走到窗口底就重置，慢慢覆盖全部历史帖 |
 | 离线可用 | 断网/飞行模式下照常浏览已存档内容，图片照常显示 |
 | 定时抓取 | AlarmManager 链式重排，间隔下限 15 分钟（默认 30），开机自启重排 |
 | 一键导出 | 把 db + 全部图片打成 zip，走 SAF 存到任意位置（不要存储权限） |
@@ -104,20 +105,33 @@ token 从哪来：抓一次 App 的 HTTPS 流量（mitmproxy / Frida 均可）�
 ### 三级采集链
 
 ```
-GET  /thread/v2/list?count=10&from_time=<unix秒>  → data.list（时间流，窗口 47.9h）
+GET  /thread/search?count=10&end_time=<unix秒>   → data.list（时间流，窗口约 47h）
 GET  /thread/hot?count=10&type=3                 → data.list（rank 1..10，只有 top 10）
 GET  /thread/info?id=<tid>                       → data.detail（72 字段）+ data.t_sign
 GET  /comment/list?id=<tid>                      → data.total + data.list（一级 + 楼中楼）
 ```
 
+> **2026-11-01 重要变更：`/thread/v2/list` 已彻底失效。** 服务端固定返回
+> `{"errno":0,"errmsg":"","data":{"list":[]}}`（99 字节，永远空）。参数（`count` /
+> `from_time` / `p_time` / `last_time` / `start_time` / `max_time` / `before` / `after` /
+> `cursor` / `time` / `ts` / `from` / `type` / `cate_id` / `sort` / `keyword` 全试过）、
+> 版本号（`2.9.0` ~ `4.0.0` 六个）、GET/POST、路径变体（`/thread/v2/list/all` /
+> `/thread/v1/list` / `/thread/v3/list` …）**一律空列表**。`/thread/hot`、
+> `/thread/info`、`/comment/list`、`/thread/toplist` 在同一 token 同一签名下全部正常，
+> 所以不是签名/token/时钟问题，是平台下线了该接口。
+>
+> 替代接口是 **`/thread/search`**：它的 `keyword` 参数完全无效（传什么都返回同一批帖子），
+> 实际上就是个纯时间流，用 `end_time`（unix 秒）作游标，返回 `p_time < end_time` 的帖子。
+
 ### 参数的真实边界（文档里写错的都在这里）
 
 | 项 | 实测结论 |
 |---|---|
-| `count` | 上限 **10**。`1/2/3` 都回 3 条，`4..10` 精确，**`≥11` 全部回落 3 条**。`/thread/v2/list` 的 count 也完全无效，永远 10 条 |
-| `from_time` | **唯一有效的翻页参数**（unix 秒）。`p_time` 也是 unix 秒字符串。**有效窗口约 47.9 小时**，`≥48h` 静默回落最新 10 条（errno 0，不报错） |
-| 其余分页参数 | `page` / `offset` / `last_id` / `cursor` / `last_rank` … 全部无效 |
-| `type` | **字段丰富度开关**。省略或 `=1` 只回 **8** 个字段；`0/2/3/4…` 回 **25** 个字段。**不影响排名**，只影响字段 |
+| `count` | 上限 **10**。`/thread/search` 的 count 也完全无效，传 `1/5/20/50/100` 都回 9~10 条 |
+| `end_time` | **`/thread/search` 唯一有效的翻页参数**（unix 秒），返回 `p_time < end_time` 的帖子。第一页传当前秒，后续传上一页的 `min(p_time)`。`p_time` 也是 unix 秒字符串。**有效窗口约 47 小时**：`-47h` 还有 9 条，`-48h` 起 `total=0` 返回空列表（errno 0，不报错） |
+| `from_id` | `/thread/new/list` 的唯一有效参数，但语义是「id > from_id 的下限过滤」，**只能拿到更新的帖子，拿不到更旧的** |
+| 其余分页参数 | `page` / `offset` / `last_id` / `cursor` / `last_rank` / `from_time`（对 search）… 全部无效 |
+| `type` | **字段丰富度开关**。省略或 `=1` 只回 **8** 个字段；`0/2/3/4…` 回 **25** 个字段。**不影响排名**，只影响字段。`/thread/new/list` 则相反：**不带 `type` 返回空，带任意 type 值才返回 10 条** |
 | `sign` | `/comment/list` 的 `t_sign` **完全可省**，传 `"AAAA"` 也回一样的数据 |
 | `from` | `/thread/info` 的 `from` 参数无影响，只传 `id` 即可 |
 | GET vs POST | 掉出时间流的老帖用 **GET** `/thread/info` 仍全量可拉；用 POST 会 `errno 6` 签名校验失败 |
@@ -258,7 +272,8 @@ java "-Dfile.encoding=UTF-8" "-cp" "out\live;json.jar" ApiLiveTest "你的token"
 - **没在真手机上验过**。全部验证在 Android 14 x86_64 模拟器（WHPX 加速，720×1280）。
 - 国产 ROM 需要手动在「电池优化 / 自启动」里给「赞奥热榜」放行，否则后台 AlarmManager 会被杀。
 - 热榜只有前 10，拿不到 11+。这是接口硬限制，不是没做。
-- **时间流只能回溯 47.9 小时**。更早的帖子接口不给了（`from_time` 超过 48h 会静默回落最新 10 条），所以第一次装必须靠回填段跑几轮才能补到窗口边界。
+- **时间流只能回溯 47 小时**。更早的帖子接口不给了（`end_time` 超过 48h 直接返回空列表，`total=0`），所以第一次装必须靠回填段把 47h 一次性补完。
+- **`/thread/v2/list` 已失效**（2026-11-01 起固定返回空列表），本项目改用 `/thread/search`。如果哪天 search 也挂了，备选是 `/thread/new/list?type=1`（只给最新 10 条，`from_id` 只能往前不能往后）。
 - 只支持 zzu 一个站（alias 写死）。换学校要改 `Api.ALIAS`。
 - token 会过期，过期后 errno 20，去设置页换。
 - 落盘的是 `@!sm_w400` 缩略图，**不是原图**。列表和详情页（显示宽度 660px）足够清晰；需要原图的场景（如另存、放大看细节）要自己拼 `@!common` 重新下。

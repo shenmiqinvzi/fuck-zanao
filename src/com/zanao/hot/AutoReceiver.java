@@ -36,7 +36,7 @@ public class AutoReceiver extends BroadcastReceiver {
                     if (!sp.getBoolean(KEY_ENABLED, true)) return;
                     String token = sp.getString(MainActivity.KEY_TOKEN, "");
                     if (token.length() == 0) return;
-                    Fetcher.runOnce(app, token);
+                    Fetcher.runScheduled(app, token);
                 } catch (Exception ignore) {
                 }
             }

@@ -183,22 +183,29 @@ public final class Api {
     }
 
     /**
-     * 时间流：按 p_time 严格降序返回该时间点之前的 10 条。
+     * 时间流：按 p_time 严格降序返回该时间点【之前】的 9~10 条。
      *
-     * 实测要点（真接口验证过）：
-     *  - count 完全无效，传 1/5/20/50 都只回 10 条
-     *  - from_time 有效窗口 ≈ 47.9 小时；≥48h 会【静默】回落成最新 10 条，不报错
+     * 2026-11-01 实测要点（真接口验证过）：
+     *  - /thread/v2/list 已彻底失效：固定返回 {"errno":0,"errmsg":"","data":{"list":[]}}，
+     *    参数、版本号、GET/POST、路径变体全试过，一律空列表（服务端行为，不是签名/token 问题）
+     *  - 替代接口是 /thread/search：keyword 参数完全无效，它就是个纯时间流
+     *  - count 完全无效，传 1/5/20/50/100 都只回 9~10 条
+     *  - 游标参数是 end_time（unix 秒）：返回 p_time < end_time 的帖子，所以第一页传当前秒、
+     *    后续页传上一页的 min(p_time)。原 from_time 语义是"往更旧翻"，end_time 是"取该时刻之前"
+     *  - 有效窗口 ≈ 47 小时：-47h 还有 9 条，-48h 起 total=0 返回空列表（不报错）
      *  - 只有 p_time（unix 秒字符串）是精确时间；post_time 是 '刚刚'/'19:33' 这类相对文本
-     *  - item 里 content 大多非空（5 页 50 条里 45 条有正文），可省掉一次 info
+     *  - item 字段 32 个，比 v2/list 少 is_anon/delete_status/delete_reason_text/check_reason_text
      *  - 没有 hot_rank（热榜是独立榜，与时间流首页 10 帖重叠 0 条）
+     *  - 偶发 urlopen timed out，调用方需重试
      */
-    public static final long FEED_WINDOW_SEC = 47L * 3600 + 50 * 60;   // 47h50m，留安全余量
+    public static final long FEED_WINDOW_SEC = 47L * 3600;   // 47h，48h 起服务端归零
 
     public JSONArray feed(long fromTime) throws Exception {
         LinkedHashMap<String, String> p = new LinkedHashMap<>();
         p.put("count", "10");
-        if (fromTime > 0) p.put("from_time", String.valueOf(fromTime));
-        JSONObject r = request("/thread/v2/list", p);
+        // end_time 缺省时服务器按当前时间返回最新一批；显式传当前秒语义更明确
+        p.put("end_time", String.valueOf(fromTime > 0 ? fromTime : System.currentTimeMillis() / 1000L));
+        JSONObject r = request("/thread/search", p);
         if (r.optInt("errno", -1) != 0) {
             throw new IOException2(errnoText(r.optInt("errno"), r.optString("errmsg")));
         }

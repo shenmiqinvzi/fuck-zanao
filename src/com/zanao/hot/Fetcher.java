@@ -6,11 +6,11 @@ import org.json.JSONArray;
 import org.json.JSONObject;
 
 /**
- * 抓取流水线 v2 —— 时间流优先，不再"按期快照"。
+ * 抓取流水线 v3 —— 时间流优先，不再"按期快照"。
  *
  * 一轮分两段走：
  *
- *  A) 增量：从最新（from_time=0）往回翻，直到某一页【既没有新帖、也没有评论数变化】为止。
+ *  A) 增量：从最新（end_time=当前秒）往回翻，直到某一页【既没有新帖、也没有评论数变化】为止。
  *     正常情况下 1~2 页就够（半小时大约 10~25 帖）。
  *
  *  B) 回填：从 meta 里的 backfill_cursor 继续往更早翻。只有 A 段翻满上限还没碰到干净页
@@ -19,8 +19,10 @@ import org.json.JSONObject;
  * 两段都用同一个 processThreads()：新帖拉 info + 全量评论，老帖只在评论数涨了时重拉评论。
  *
  * 实测约束：
- *  - count 参数无效，永远 10 条
- *  - from_time 超过约 47.9 小时会【静默】回落成最新 10 条，不报错 → 必须自己卡窗口
+ *  - /thread/v2/list 已失效（服务端固定返回空列表），改用 /thread/search?end_time=
+ *  - count 参数无效，永远 9~10 条
+ *  - end_time 有效窗口约 47 小时：-47h 还有数据，-48h 起返回空列表（不报错）→ 必须自己卡窗口
+ *  - /thread/search 偶发超时，翻页需重试（见 feedWithRetry）
  *  - 帖子一旦记过 thread_id，之后永久可拉正文+评论（掉榜不影响）
  *  - 评论只增不减，变化基本只有"此内容已被用户自行删除"
  */
@@ -40,8 +42,44 @@ public final class Fetcher {
 
     private static final String K_BACKFILL = "backfill_cursor";
 
-    /** 抓一轮。返回一段人话总结 */
+    /** 滚动复查游标：老帖评论慢慢往回刷，走到底置 0，下一轮从最新重来 */
+    private static final String K_REFRESH = "refresh_cursor";
+
+    /** 滚动复查段一轮最多花多少毫秒 */
+    private static final long REFRESH_BUDGET_MS = 3L * 60 * 1000;
+
+    /** 滚动复查段页数硬上限 */
+    private static final int REFRESH_MAX_PAGES = 120;
+
+    /**
+     * 防并发：连点两次「刷新」会起两个 runOnce，两轮同时往同一个库写，
+     * fetch_log 里能看到 ts 只差 3 秒的两条记录。用进程内闸门挡住第二轮。
+     */
+    private static final java.util.concurrent.atomic.AtomicBoolean RUNNING =
+            new java.util.concurrent.atomic.AtomicBoolean(false);
+
+    /** 手动刷新：只跑增量段，秒级返回 */
     public static String runOnce(Context ctx, String token) throws Exception {
+        return runOnce(ctx, token, false);
+    }
+
+    /** 定时任务：增量 + 回填 + 滚动复查，跑得慢但覆盖全 */
+    public static String runScheduled(Context ctx, String token) throws Exception {
+        return runOnce(ctx, token, true);
+    }
+
+    private static String runOnce(Context ctx, String token, boolean deep) throws Exception {
+        if (!RUNNING.compareAndSet(false, true)) {
+            throw new IllegalStateException("上一轮抓取还没结束，等它跑完再点");
+        }
+        try {
+            return runOnceInner(ctx, token, deep);
+        } finally {
+            RUNNING.set(false);
+        }
+    }
+
+    private static String runOnceInner(Context ctx, String token, boolean deep) throws Exception {
         Api api = new Api(token);
         Db db = new Db(ctx);
         int imgOk = 0;
@@ -69,7 +107,7 @@ public final class Fetcher {
             long frontier = Long.MAX_VALUE;
             boolean capped = true;
             for (int p = 0; p < INCR_MAX_PAGES; p++) {
-                JSONArray page = api.feed(fromTime);
+                JSONArray page = feedWithRetry(api, fromTime);
                 if (page.length() == 0) {
                     capped = false;
                     break;
@@ -105,23 +143,28 @@ public final class Fetcher {
             }
             if (frontier != Long.MAX_VALUE) oldest = frontier;
 
-            // 游标只能往回（更早）走：已有游标且比 frontier 更早时保持不动，
-            // 否则每轮都会把游标重置到最新，回填段原地打转永远推不动。
-            // 首次没有游标时也要播种，否则增量段一旦干净收尾，回填永远不启动。
-            if (frontier != Long.MAX_VALUE) {
-                long cur = db.metaLong(K_BACKFILL, 0);
-                if (cur <= 0 || frontier < cur) {
+            // 游标语义（三种状态必须区分开，混在一起就会每轮重扫整个 47 小时窗口）：
+            //   -1 / 不存在 = 从没回填过（首次装机）→ 用本轮的 frontier 播种
+            //   >0          = 回填进行中 → 只能往回（更早）走，否则原地打转
+            //   0           = 回填已完成 → 不再播种，靠增量段 + 滚动段继续跟
+            // 只有增量段【翻满上限仍没碰到干净页】（长时间断网/首次运行）才需要开回填，
+            // 否则每轮都把游标设成 1 小时前的 frontier，回填段就要重扫 180 页。
+            if (capped && frontier != Long.MAX_VALUE) {
+                long cur = db.metaLong(K_BACKFILL, -1);
+                if (cur < 0) {
+                    db.setMeta(K_BACKFILL, String.valueOf(frontier));
+                } else if (cur > 0 && frontier < cur) {
                     db.setMeta(K_BACKFILL, String.valueOf(frontier));
                 }
             }
 
-            // ---------- 2B) 回填：从上次断点继续往更早，按时间预算 ----------
+            // ---------- 2B) 回填：一次性把历史窗口补齐（做完就置 0，不再启动）----------
             long cursor = db.metaLong(K_BACKFILL, 0);
             long backfillDeadline = System.currentTimeMillis() + BACKFILL_BUDGET_MS;
-            if (cursor > 0 && cursor > windowStart) {
+            if (deep && cursor > 0 && cursor > windowStart) {
                 for (int p = 0; p < BACKFILL_MAX_PAGES; p++) {
                     if (System.currentTimeMillis() > backfillDeadline) break;
-                    JSONArray page = api.feed(cursor);
+                    JSONArray page = feedWithRetry(api, cursor);
                     if (page.length() == 0) {
                         cursor = 0;
                         break;
@@ -152,21 +195,90 @@ public final class Fetcher {
                 db.setMeta(K_BACKFILL, String.valueOf(cursor));
             }
 
+            // ---------- 2C) 滚动复查：老帖的评论只增不减，所以必须慢慢往回刷一遍 ----------
+            // 每轮只花 REFRESH_BUDGET_MS 的时间预算，走到窗口底就置 0，下一轮从最新重新开始。
+            // 这样"刷新只刷评论"能覆盖到全部历史帖，又不会一轮重扫 180 页。
+            long rcursor = db.metaLong(K_REFRESH, 0);
+            long refreshDeadline = System.currentTimeMillis() + REFRESH_BUDGET_MS;
+            if (rcursor <= 0) {
+                rcursor = ts / 1000L;   // 新一轮滚动：从最新开始往回
+            }
+            int refreshPages = 0;
+            if (deep && rcursor > windowStart) {
+                for (int p = 0; p < REFRESH_MAX_PAGES; p++) {
+                    if (System.currentTimeMillis() > refreshDeadline) break;
+                    JSONArray page;
+                    try {
+                        page = feedWithRetry(api, rcursor);
+                    } catch (Exception e) {
+                        break;   // 滚动段失败不影响本轮结果，下次接着来
+                    }
+                    if (page.length() == 0) {
+                        rcursor = 0;
+                        break;
+                    }
+                    refreshPages++;
+                    pages++;
+
+                    Db.FeedResult fr = db.saveFeedPage(ts, page);
+                    newThreads += fr.added.size();
+                    // 滚动段只补评论，不补 info（正文只在增量段和回填段拉）
+                    int[] r = processThreads(ctx, api, db, ts, fr.added, fr.needDetail, fr.needComments);
+                    newComments += r[0];
+                    changedComments += r[1];
+                    imgOk += r[2];
+                    imgFail += r[3];
+
+                    if (fr.minPostedAt == Long.MAX_VALUE) {
+                        rcursor = 0;
+                        break;
+                    }
+                    rcursor = fr.minPostedAt;
+                    if (rcursor <= windowStart) {
+                        rcursor = 0;   // 走到底，下一轮从最新重新开始
+                        break;
+                    }
+                }
+                db.setMeta(K_REFRESH, String.valueOf(rcursor));
+            }
+
             // ---------- 3) 收尾 ----------
             // 顺手把历史遗留的原图换成缩略图（先下新图、再删旧图，失败则保留）
             long[] shrunk = ImgCache.shrink(ctx, 60L * 1000);
             String period = Db.periodOf(ts);
             db.logFetch(ts, pages, newThreads, newComments, changedComments,
                     imgOk, imgFail, oldest,
-                    "rankChanged=" + rankChanged + " shrink=" + shrunk[0]);
+                    "rankChanged=" + rankChanged + " shrink=" + shrunk[0]
+                            + " refreshPages=" + refreshPages);
             db.setLastResult(ctx, ts, period, imgOk, imgFail);
             return "翻 " + pages + " 页 · 新帖 " + newThreads + " · 新评论 " + newComments
                     + " · 改动评论 " + changedComments + " · 名次变化 " + rankChanged
                     + " · 图 " + imgOk + "/" + (imgOk + imgFail)
-                    + " · 缩略化 " + shrunk[0] + " 张省 " + (shrunk[1] / 1024) + " KB";
+                    + " · 缩略化 " + shrunk[0] + " 张省 " + (shrunk[1] / 1024) + " KB"
+                    + (refreshPages > 0 ? " · 复查 " + refreshPages + " 页" : "");
         } finally {
             db.close();
         }
+    }
+
+    /**
+     * /thread/search 偶发 urlopen timed out，翻页时给三次机会。
+     * 全失败就抛出，让上层把本轮记成失败（不要静默当成"没有新帖"）。
+     */
+    private static JSONArray feedWithRetry(Api api, long cursor) throws Exception {
+        Exception last = null;
+        for (int i = 0; i < 3; i++) {
+            try {
+                return api.feed(cursor);
+            } catch (Exception e) {
+                last = e;
+                try {
+                    Thread.sleep(1200L * (i + 1));
+                } catch (InterruptedException ignore) {
+                }
+            }
+        }
+        throw last == null ? new Exception("feed failed") : last;
     }
 
     /**
