@@ -1,0 +1,19 @@
+# 构建产物
+/out/
+*.class
+*.dex
+
+# 本地 SDK（体积大，不入库）
+/sdk/
+/build-tools/
+/platforms/
+
+# 本地 token（绝不入库）
+token.txt
+*.token
+
+# 编辑器 / 系统
+.vscode/
+.idea/
+*.log
+Thumbs.db

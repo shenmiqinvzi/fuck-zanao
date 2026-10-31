@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">赞奥热榜</string>
+    <!-- 默认 token 留空：构建时由 build.ps1 从 token.txt 注入；也可装好后在 App 设置页填写 -->
+    <string name="default_token"></string>
+</resources>
