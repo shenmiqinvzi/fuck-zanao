@@ -46,22 +46,17 @@ public final class Exporter {
     /** 把库和图片写进用户选定的 Uri。返回说明文本 */
     static String write(Context ctx, Uri target) throws Exception {
         Db db = new Db(ctx);
-        int periods = 0;
         int threads = 0;
         int comments = 0;
+        int bodyHist = 0;
+        int commentHist = 0;
+        int rankEvents = 0;
         try {
-            android.database.Cursor c1 = db.getReadableDatabase().rawQuery(
-                    "SELECT COUNT(DISTINCT period) FROM rank_snapshot", null);
-            if (c1.moveToFirst()) periods = c1.getInt(0);
-            c1.close();
-            android.database.Cursor c2 = db.getReadableDatabase().rawQuery(
-                    "SELECT COUNT(*) FROM threads", null);
-            if (c2.moveToFirst()) threads = c2.getInt(0);
-            c2.close();
-            android.database.Cursor c3 = db.getReadableDatabase().rawQuery(
-                    "SELECT COUNT(*) FROM comments", null);
-            if (c3.moveToFirst()) comments = c3.getInt(0);
-            c3.close();
+            threads = count(db, "SELECT COUNT(*) FROM threads");
+            comments = count(db, "SELECT COUNT(*) FROM comments");
+            bodyHist = count(db, "SELECT COUNT(*) FROM thread_detail_snap");
+            commentHist = count(db, "SELECT COUNT(*) FROM comment_content_snap");
+            rankEvents = count(db, "SELECT COUNT(*) FROM rank_event");
 
             OutputStream os = ctx.getContentResolver().openOutputStream(target);
             if (os == null) throw new Api.IOException2("无法打开输出目标");
@@ -96,13 +91,17 @@ public final class Exporter {
                 StringBuilder sb = new StringBuilder();
                 sb.append("赞奥热榜 存档导出\n");
                 sb.append("导出时间: ").append(new SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.US).format(new Date())).append('\n');
-                sb.append("期数: ").append(periods).append('\n');
                 sb.append("帖子: ").append(threads).append('\n');
                 sb.append("评论: ").append(comments).append('\n');
+                sb.append("正文历史版本: ").append(bodyHist).append('\n');
+                sb.append("评论原话留存: ").append(commentHist).append('\n');
+                sb.append("名次变化记录: ").append(rankEvents).append('\n');
                 sb.append("图片: ").append(imgCount).append('\n');
                 sb.append('\n');
-                sb.append("说明: 图片文件名是原 URL 的 md5；对照 threads.detail_json 与 comments.raw_json 里的\n");
-                sb.append("img_paths / img_list 即可还原对应关系。\n");
+                sb.append("说明: 图片文件名是图片内容的 md5（不是 URL 的 md5），同一张图挂不同 URL 只存一份。\n");
+                sb.append("对照 img_ref 表（url -> content_md5）即可还原 URL 与文件的对应关系。\n");
+                sb.append("thread_detail_snap 存帖子正文被编辑前的旧版本；\n");
+                sb.append("comment_content_snap 存评论被删/被改前的原话。\n");
                 sb.append("原站地址: http://api.app.zanao.com  社区: zzu\n");
                 zip.putNextEntry(new ZipEntry("manifest.txt"));
                 zip.write(sb.toString().getBytes("UTF-8"));
@@ -110,9 +109,19 @@ public final class Exporter {
             } finally {
                 zip.close();
             }
-            return "已导出 " + periods + " 期 / " + threads + " 帖 / " + comments + " 条评论 / " + sizeText(ImgCache.size(ctx));
+            return "已导出 " + threads + " 帖 / " + comments + " 条评论 / " + bodyHist + " 版正文 / "
+                    + commentHist + " 条原话 / " + sizeText(ImgCache.size(ctx));
         } finally {
             db.close();
+        }
+    }
+
+    private static int count(Db db, String sql) {
+        android.database.Cursor c = db.getReadableDatabase().rawQuery(sql, null);
+        try {
+            return c.moveToFirst() ? c.getInt(0) : 0;
+        } finally {
+            c.close();
         }
     }
 

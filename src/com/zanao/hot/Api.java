@@ -39,6 +39,13 @@ public final class Api {
     /** 图片必须带这个后缀，裸 URL 一律 403 */
     public static final String IMG_SUFFIX = "@!common";
 
+    /**
+     * 缩略图后缀（实测可用）：400px 宽，体积约是 @!common 原图的 1/11。
+     * 抽样 25 张：原图 19.4 MB → 缩略图 1.8 MB；单张 3427x4570 1.7 MB → 400x533 59 KB。
+     * 只有 @!sm_w400 存在，@!sm_w600 / @!w400 / @!middle 等一律 404。
+     */
+    public static final String THUMB_SUFFIX = "@!sm_w400";
+
     private static final Random RND = new Random();
 
     public String token;
@@ -175,6 +182,32 @@ public final class Api {
         return detail;
     }
 
+    /**
+     * 时间流：按 p_time 严格降序返回该时间点之前的 10 条。
+     *
+     * 实测要点（真接口验证过）：
+     *  - count 完全无效，传 1/5/20/50 都只回 10 条
+     *  - from_time 有效窗口 ≈ 47.9 小时；≥48h 会【静默】回落成最新 10 条，不报错
+     *  - 只有 p_time（unix 秒字符串）是精确时间；post_time 是 '刚刚'/'19:33' 这类相对文本
+     *  - item 里 content 大多非空（5 页 50 条里 45 条有正文），可省掉一次 info
+     *  - 没有 hot_rank（热榜是独立榜，与时间流首页 10 帖重叠 0 条）
+     */
+    public static final long FEED_WINDOW_SEC = 47L * 3600 + 50 * 60;   // 47h50m，留安全余量
+
+    public JSONArray feed(long fromTime) throws Exception {
+        LinkedHashMap<String, String> p = new LinkedHashMap<>();
+        p.put("count", "10");
+        if (fromTime > 0) p.put("from_time", String.valueOf(fromTime));
+        JSONObject r = request("/thread/v2/list", p);
+        if (r.optInt("errno", -1) != 0) {
+            throw new IOException2(errnoText(r.optInt("errno"), r.optString("errmsg")));
+        }
+        JSONObject d = dataObj(r);
+        if (d == null) return new JSONArray();
+        JSONArray list = d.optJSONArray("list");
+        return list == null ? new JSONArray() : list;
+    }
+
     /** 全部评论（一次拉完，无分页）。返回 {total, list} */
     public JSONObject comments(String threadId) throws Exception {
         LinkedHashMap<String, String> p = new LinkedHashMap<>();
@@ -190,7 +223,7 @@ public final class Api {
 
     // ---------------------------------------------------------------- 图片
 
-    /** 把 img_paths 里的相对路径拼成可下载的完整 URL */
+    /** 把 img_paths 里的相对路径拼成可下载的完整 URL（原图 @!common） */
     public static String imgUrl(String path) {
         if (path == null || path.length() == 0) return null;
         if (path.startsWith("http://") || path.startsWith("https://")) {
@@ -198,6 +231,24 @@ public final class Api {
             return path;
         }
         return CDN + path + IMG_SUFFIX;
+    }
+
+    /**
+     * 把任意图片 URL（裸 URL / 带 @!common / 带别的后缀）统一换成缩略图 URL。
+     * 落盘与渲染都走这个，保证库里存的都是小图，省存储又省流量。
+     */
+    public static String thumbUrl(String url) {
+        if (url == null || url.length() == 0) return null;
+        String base = stripSuffix(url);
+        if (base == null || base.length() == 0) return null;
+        return base + THUMB_SUFFIX;
+    }
+
+    /** 去掉已有的 @!xxx 后缀；没有后缀原样返回 */
+    public static String stripSuffix(String url) {
+        if (url == null) return null;
+        int i = url.indexOf("@!");
+        return i < 0 ? url : url.substring(0, i);
     }
 
     public static byte[] download(String url) throws Exception {

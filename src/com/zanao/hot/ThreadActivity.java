@@ -16,16 +16,18 @@ import android.widget.ImageView;
 import android.widget.LinearLayout;
 import android.widget.ScrollView;
 import android.widget.TextView;
-import android.widget.Toast;
 
 import org.json.JSONArray;
 import org.json.JSONObject;
 
+import java.text.SimpleDateFormat;
+import java.util.Date;
+import java.util.Locale;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 
 /**
- * 帖子存档页：正文 + 图 + 全量评论（含楼中楼、已删楼标记）
+ * 帖子存档页 v2：正文（含改过的旧版）+ 图 + 全量评论（含楼中楼、已删楼的原话）
  */
 public class ThreadActivity extends Activity {
 
@@ -47,7 +49,6 @@ public class ThreadActivity extends Activity {
         box.setBackgroundColor(Color.WHITE);
         sv.addView(box);
 
-        // 顶部返回条（NoActionBar 主题下自己画，否则没有返回入口）
         LinearLayout shell = new LinearLayout(this);
         shell.setOrientation(LinearLayout.VERTICAL);
         shell.setBackgroundColor(Color.WHITE);
@@ -88,10 +89,10 @@ public class ThreadActivity extends Activity {
 
     private void render() {
         box.removeAllViews();
-        JSONObject d = db.thread(tid);
+        JSONObject d = db.threadFull(tid);
         if (d == null) {
             TextView tv = new TextView(this);
-            tv.setText("本地没有这个帖的详情存档");
+            tv.setText("本地没有这个帖的存档");
             tv.setPadding(dp(16), dp(16), dp(16), dp(16));
             box.addView(tv);
             return;
@@ -99,7 +100,8 @@ public class ThreadActivity extends Activity {
 
         // ---- 标题
         TextView title = new TextView(this);
-        title.setText(d.optString("title"));
+        String t = d.optString("title");
+        title.setText(t.length() == 0 ? "（无标题）" : t);
         title.setTextSize(19);
         title.setTextColor(Color.BLACK);
         title.setPadding(dp(14), dp(14), dp(14), dp(6));
@@ -111,7 +113,13 @@ public class ThreadActivity extends Activity {
         if (d.optBoolean("is_anon")) nick = nick + "（匿名）";
         String cat = d.optString("cate_name");
         String pt = d.optString("pt_time");
-        meta.setText(nick + " · " + cat + " · " + pt);
+        StringBuilder mb = new StringBuilder();
+        if (nick.length() > 0) mb.append(nick);
+        if (cat.length() > 0) mb.append(mb.length() > 0 ? " · " : "").append(cat);
+        if (pt.length() > 0) mb.append(mb.length() > 0 ? " · " : "").append(pt);
+        int rank = d.optInt("hot_rank", 0);
+        if (rank > 0) mb.append(mb.length() > 0 ? " · " : "").append("曾上榜第 ").append(rank).append(" 名");
+        meta.setText(mb.toString());
         meta.setTextSize(12);
         meta.setTextColor(0xFF888888);
         meta.setPadding(dp(14), 0, dp(14), dp(10));
@@ -119,11 +127,43 @@ public class ThreadActivity extends Activity {
 
         // ---- 正文
         TextView content = new TextView(this);
-        content.setText(d.optString("content"));
+        String body = d.optString("content");
+        content.setText(body.length() == 0 ? "（正文为空，可能原帖没写或已被清空）" : body);
         content.setTextSize(15);
-        content.setTextColor(0xFF222222);
+        content.setTextColor(body.length() == 0 ? 0xFF999999 : 0xFF222222);
         content.setPadding(dp(14), 0, dp(14), dp(10));
         box.addView(content);
+
+        // ---- 正文被改过的旧版本
+        Cursor dh = db.detailHistory(tid);
+        int dhCount = 0;
+        try {
+            dhCount = dh.getCount();
+            if (dhCount > 0) {
+                TextView h = new TextView(this);
+                h.setText("正文改过 " + dhCount + " 次，旧版如下：");
+                h.setTextSize(12);
+                h.setTextColor(0xFFAA5500);
+                h.setPadding(dp(14), dp(4), dp(14), dp(4));
+                box.addView(h);
+                int shown = 0;
+                while (dh.moveToNext() && shown < 10) {
+                    shown++;
+                    long ts = dh.getLong(0);
+                    String ot = dh.getString(1);
+                    String oc = dh.getString(2);
+                    TextView hv = new TextView(this);
+                    hv.setText("【" + fmtTs(ts) + "】" + ot + "\n" + oc);
+                    hv.setTextSize(13);
+                    hv.setTextColor(0xFF777777);
+                    hv.setPadding(dp(14), dp(2), dp(14), dp(6));
+                    hv.setBackgroundColor(0xFFFAFAFA);
+                    box.addView(hv);
+                }
+            }
+        } finally {
+            dh.close();
+        }
 
         // ---- 帖子图（img_paths 是相对路径，要拼 @!common）
         JSONArray ip = d.optJSONArray("img_paths");
@@ -144,13 +184,44 @@ public class ThreadActivity extends Activity {
 
         // ---- 数据行
         TextView stats = new TextView(this);
-        stats.setText("浏览 " + d.optInt("view_count") + " · 赞 " + d.optString("like_num")
-                + " · 收藏 " + d.optString("mark_num")
-                + " · " + (d.optString("delete_status").equals("10") ? "状态正常" : "状态异常"));
+        StringBuilder s = new StringBuilder();
+        s.append("浏览 ").append(d.optLong("view_count"));
+        s.append(" · 赞 ").append(d.optString("like_num", "0"));
+        s.append(" · 收藏 ").append(d.optString("mark_num", "0"));
+        s.append(" · 评论 ").append(d.optString("c_count", "0"));
+        String drt = d.optString("delete_reason_text");
+        String crt = d.optString("check_reason_text");
+        if (drt.length() > 0 || crt.length() > 0) {
+            s.append(" · 状态：").append(drt.length() > 0 ? drt : crt);
+        }
+        stats.setText(s.toString());
         stats.setTextSize(12);
         stats.setTextColor(0xFF888888);
         stats.setPadding(dp(14), dp(6), dp(14), dp(6));
         box.addView(stats);
+
+        // ---- 名次轨迹
+        Cursor rh = db.rankHistory(tid);
+        try {
+            int n = rh.getCount();
+            if (n > 1) {
+                StringBuilder rb = new StringBuilder("名次轨迹：");
+                int shown = 0;
+                while (rh.moveToNext() && shown < 12) {
+                    if (shown > 0) rb.append(" → ");
+                    rb.append(rh.getInt(1)).append("（").append(shortTs(rh.getLong(0))).append("）");
+                    shown++;
+                }
+                TextView rv = new TextView(this);
+                rv.setText(rb.toString());
+                rv.setTextSize(12);
+                rv.setTextColor(0xFF888888);
+                rv.setPadding(dp(14), 0, dp(14), dp(6));
+                box.addView(rv);
+            }
+        } finally {
+            rh.close();
+        }
 
         // ---- 原站链接
         TextView link = new TextView(this);
@@ -170,7 +241,6 @@ public class ThreadActivity extends Activity {
         });
         box.addView(link);
 
-        // ---- 分隔
         addSep();
 
         // ---- 评论
@@ -183,17 +253,33 @@ public class ThreadActivity extends Activity {
         Cursor c = db.commentsOf(tid);
         int total = 0;
         int deleted = 0;
+        int withHist = 0;
         try {
             total = c.getCount();
             while (c.moveToNext()) {
                 boolean isDel = c.getInt(5) == 1;
                 if (isDel) deleted++;
+                String cid = c.getString(0);
+                if (hasHistory(cid)) withHist++;
                 addComment(c, isDel);
             }
         } finally {
             c.close();
         }
-        cTitle.setText("评论 " + total + " 条" + (deleted > 0 ? "（其中 " + deleted + " 条已删）" : ""));
+        StringBuilder cb = new StringBuilder("评论 ").append(total).append(" 条");
+        if (deleted > 0) cb.append("（其中 ").append(deleted).append(" 条已删）");
+        if (withHist > 0) cb.append(" · ").append(withHist).append(" 条留有原话");
+        cTitle.setText(cb.toString());
+    }
+
+    /** 该评论有没有留下旧版内容 */
+    private boolean hasHistory(String commentId) {
+        Cursor h = db.commentHistory(commentId);
+        try {
+            return h.getCount() > 0;
+        } finally {
+            h.close();
+        }
     }
 
     private void addSep() {
@@ -205,11 +291,11 @@ public class ThreadActivity extends Activity {
 
     private void addComment(Cursor c, boolean isDeleted) {
         String cid = c.getString(0);
-        String root = c.getString(6);
         String nick = c.getString(1);
         String text = c.getString(2);
         String time = c.getString(3);
         String like = c.getString(4);
+        String root = c.getString(6);
         String avatar = c.getString(8);
         String imgs = c.getString(9);
 
@@ -218,7 +304,6 @@ public class ThreadActivity extends Activity {
         row.setOrientation(LinearLayout.VERTICAL);
         row.setPadding(dp(isLayer ? 34 : 14), dp(8), dp(14), dp(8));
 
-        // 头像 + 昵称行（headimgurl 已自带 @!sm_w100_h100，不用再拼）
         LinearLayout headRow = new LinearLayout(this);
         headRow.setOrientation(LinearLayout.HORIZONTAL);
         if (avatar != null && avatar.length() > 4) {
@@ -244,6 +329,31 @@ public class ThreadActivity extends Activity {
         body.setTextColor(isDeleted ? 0xFFAAAAAA : 0xFF222222);
         row.addView(body);
 
+        // 已删的评论：把留档的原话显示出来（v2 的核心价值）
+        if (isDeleted) {
+            Cursor h = db.commentHistory(cid);
+            try {
+                int n = h.getCount();
+                int shown = 0;
+                while (h.moveToNext() && shown < 3) {
+                    shown++;
+                    long ts = h.getLong(0);
+                    String old = h.getString(1);
+                    if (old == null || old.length() == 0) continue;
+                    if (old.equals(text)) continue;
+                    TextView hv = new TextView(this);
+                    hv.setText("原话（" + fmtTs(ts) + "）：" + old);
+                    hv.setTextSize(13);
+                    hv.setTextColor(0xFF7755AA);
+                    hv.setBackgroundColor(0xFFF5F0FF);
+                    hv.setPadding(dp(8), dp(4), dp(8), dp(4));
+                    row.addView(hv);
+                }
+            } finally {
+                h.close();
+            }
+        }
+
         if (imgs != null && imgs.length() > 0) {
             for (String u : imgs.split(",")) {
                 if (u.length() == 0) continue;
@@ -266,8 +376,17 @@ public class ThreadActivity extends Activity {
         box.addView(sep);
     }
 
+    private static String fmtTs(long ts) {
+        SimpleDateFormat f = new SimpleDateFormat("MM-dd HH:mm", Locale.US);
+        return f.format(new Date(ts));
+    }
+
+    private static String shortTs(long ts) {
+        SimpleDateFormat f = new SimpleDateFormat("dd日HH:mm", Locale.US);
+        return f.format(new Date(ts));
+    }
+
     private void loadInto(final ImageView iv, final String url) {
-        // 优先本地缓存（永久存档的关键：帖子下架后 CDN 图也会失效）
         if (ImgCache.has(this, url)) {
             byte[] b = ImgCache.readAll(ImgCache.fileOf(this, url));
             if (b != null) {
@@ -283,7 +402,6 @@ public class ThreadActivity extends Activity {
                 try {
                     final byte[] bytes = Api.download(url);
                     if (bytes == null || bytes.length == 0) return;
-                    // 顺手落盘
                     ImgCache.fetch(ThreadActivity.this, url);
                     final Bitmap bmp = BitmapFactory.decodeByteArray(bytes, 0, bytes.length);
                     if (bmp == null) return;

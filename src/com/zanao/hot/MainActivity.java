@@ -20,31 +20,40 @@ import android.widget.ScrollView;
 import android.widget.TextView;
 import android.widget.Toast;
 
+import java.text.SimpleDateFormat;
+import java.util.Date;
+import java.util.Locale;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 
 /**
- * 主界面：本期热榜 top 10（读本地库）+ 手动刷新 + 历史期数 + 设置
+ * 主界面 v2：按发布时间倒序的帖子流（读本地库），滚到底加载更多。
+ *
+ * 与 v1 的差别：v1 首页显示"本期热榜 top 10"，v2 显示全部已存档帖子按时间排序，
+ * 热榜名次降级成行首的角标（上过榜才有）。
  */
 public class MainActivity extends Activity {
 
     static final String PREF = "zanao";
     static final String KEY_TOKEN = "token";
 
+    private static final int PAGE = 50;
+
     private Db db;
     private LinearLayout listBox;
     private TextView status;
+    private ScrollView sv;
     private ExecutorService pool = Executors.newFixedThreadPool(2);
     private Handler ui = new Handler(Looper.getMainLooper());
-    private String shownPeriod = null;
+    private long loadedBefore = 0;     // 已渲染到的最老 posted_at
+    private boolean loading = false;
 
     @Override
     protected void onCreate(Bundle b) {
         super.onCreate(b);
         db = new Db(this);
         setContentView(buildUi());
-        loadLatest();
-        // 首次进入时排上定时任务（幂等）
+        reload();
         if (getSharedPreferences(PREF, MODE_PRIVATE).getBoolean(AutoReceiver.KEY_ENABLED, true)) {
             AutoReceiver.schedule(this, AutoReceiver.intervalMin(this));
         }
@@ -72,13 +81,6 @@ public class MainActivity extends Activity {
         root.setBackgroundColor(Color.WHITE);
         root.setFitsSystemWindows(true);
 
-        LinearLayout bar = new LinearLayout(this);
-        bar.setOrientation(LinearLayout.HORIZONTAL);
-        bar.setPadding(dp(12), dp(10), dp(12), dp(6));
-        bar.setBackgroundColor(0xFFF5F5F5);
-
-        // 标题单独一行：早先放在按钮同一行用 weight=1 抢剩余宽度，
-        // 四个按钮 wrap_content 几乎占满，标题被压成 0 宽看不见。
         TextView title = new TextView(this);
         title.setText("赞奥热榜");
         title.setTextSize(20);
@@ -87,6 +89,11 @@ public class MainActivity extends Activity {
         title.setBackgroundColor(0xFFF5F5F5);
         root.addView(title);
 
+        LinearLayout bar = new LinearLayout(this);
+        bar.setOrientation(LinearLayout.HORIZONTAL);
+        bar.setPadding(dp(12), dp(10), dp(12), dp(6));
+        bar.setBackgroundColor(0xFFF5F5F5);
+
         Button refresh = new Button(this);
         refresh.setText("刷新");
         refresh.setOnClickListener(new View.OnClickListener() {
@@ -94,12 +101,12 @@ public class MainActivity extends Activity {
         });
         bar.addView(refresh);
 
-        Button hist = new Button(this);
-        hist.setText("历史");
-        hist.setOnClickListener(new View.OnClickListener() {
-            public void onClick(View v) { showHistory(); }
+        Button stats = new Button(this);
+        stats.setText("统计");
+        stats.setOnClickListener(new View.OnClickListener() {
+            public void onClick(View v) { showStats(); }
         });
-        bar.addView(hist);
+        bar.addView(stats);
 
         Button set = new Button(this);
         set.setText("设置");
@@ -123,11 +130,20 @@ public class MainActivity extends Activity {
         status.setPadding(dp(12), dp(4), dp(12), dp(4));
         root.addView(status);
 
-        ScrollView sv = new ScrollView(this);
+        sv = new ScrollView(this);
         listBox = new LinearLayout(this);
         listBox.setOrientation(LinearLayout.VERTICAL);
         sv.addView(listBox);
         root.addView(sv, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f));
+
+        // 滚到底自动加载更多
+        sv.setOnScrollChangeListener(new View.OnScrollChangeListener() {
+            public void onScrollChange(View v, int sx, int sy, int osx, int osy) {
+                View child = sv.getChildAt(0);
+                if (child == null) return;
+                if (sy + sv.getHeight() >= child.getHeight() - dp(120)) loadMore();
+            }
+        });
 
         return root;
     }
@@ -136,52 +152,98 @@ public class MainActivity extends Activity {
         return (int) (v * getResources().getDisplayMetrics().density);
     }
 
-    private void loadLatest() {
-        Cursor c = db.latestPeriod();
-        try {
-            if (c.moveToFirst()) shownPeriod = c.getString(0);
-        } finally {
-            c.close();
-        }
-        if (shownPeriod == null) {
+    // ---------------------------------------------------------------- 列表
+
+    private void reload() {
+        listBox.removeAllViews();
+        loadedBefore = 0;
+        int n = renderPage(0);
+        if (n == 0) {
             status.setText("本地还没有存档，点「刷新」抓一次");
-            listBox.removeAllViews();
             return;
         }
-        renderPeriod(shownPeriod);
+        updateStatus();
     }
 
-    private void renderPeriod(String period) {
-        shownPeriod = period;
-        listBox.removeAllViews();
-        Cursor c = db.periodRows(period);
+    private void loadMore() {
+        if (loading || loadedBefore <= 0) return;
+        loading = true;
+        int n = renderPage(loadedBefore);
+        loading = false;
+        if (n == 0) {
+            // 没有更老的了
+            loadedBefore = 0;
+        }
+        updateStatus();
+    }
+
+    /** 渲染一页，返回渲染条数 */
+    private int renderPage(long before) {
+        Cursor c = db.feedThreads(before, PAGE);
         int n = 0;
         try {
             while (c.moveToNext()) {
                 n++;
-                final String tid = c.getString(1);
-                int rank = c.getInt(0);
+                final String tid = c.getString(0);
+                long posted = c.getLong(1);
                 String t = c.getString(2);
-                String hv = c.getString(3);
+                String cate = c.getString(3);
                 String cc = c.getString(4);
                 String lc = c.getString(5);
                 int vc = c.getInt(6);
-                String cate = c.getString(7);
+                int rank = c.getInt(7);
+                String content = c.getString(8);
+                String nick = c.getString(9);
+                int hasDetail = c.getInt(10);
 
                 LinearLayout row = new LinearLayout(this);
                 row.setOrientation(LinearLayout.VERTICAL);
                 row.setPadding(dp(12), dp(10), dp(12), dp(10));
                 row.setBackgroundColor(Color.WHITE);
 
+                LinearLayout headLine = new LinearLayout(this);
+                headLine.setOrientation(LinearLayout.HORIZONTAL);
+
+                if (rank > 0) {
+                    TextView badge = new TextView(this);
+                    badge.setText("榜" + rank);
+                    badge.setTextSize(11);
+                    badge.setTextColor(Color.WHITE);
+                    badge.setBackgroundColor(0xFFFF6B4A);
+                    badge.setPadding(dp(5), dp(1), dp(5), dp(1));
+                    LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(
+                            ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+                    lp.rightMargin = dp(6);
+                    lp.topMargin = dp(2);
+                    headLine.addView(badge, lp);
+                }
+
                 TextView head = new TextView(this);
-                head.setText(rank + ". " + t);
+                String shown = t;
+                if (shown == null || shown.length() == 0) {
+                    shown = content == null ? "" : oneLine(content, 40);
+                }
+                if (shown.length() == 0) {
+                    shown = hasDetail == 1 ? "（无标题 · 纯图帖）" : "（无标题）";
+                }
+                head.setText(shown);
                 head.setTextSize(15);
                 head.setTextColor(Color.BLACK);
-                row.addView(head);
+                head.setLayoutParams(new LinearLayout.LayoutParams(0,
+                        ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
+                headLine.addView(head);
+                row.addView(headLine);
 
                 TextView meta = new TextView(this);
-                meta.setText(cate + " · 热度 " + hv + " · " + briefViews(vc)
-                        + " · 评论 " + cc + " · 赞 " + lc);
+                StringBuilder sb = new StringBuilder();
+                sb.append(timeText(posted));
+                if (cate != null && cate.length() > 0) sb.append(" · ").append(cate);
+                if (nick != null && nick.length() > 0) sb.append(" · ").append(nick);
+                sb.append(" · 评论 ").append(cc == null ? "0" : cc);
+                sb.append(" · 赞 ").append(lc == null ? "0" : lc);
+                sb.append(" · 浏览 ").append(briefViews(vc));
+                if (hasDetail == 0) sb.append(" · 未取正文");
+                meta.setText(sb.toString());
                 meta.setTextSize(12);
                 meta.setTextColor(0xFF888888);
                 row.addView(meta);
@@ -196,20 +258,65 @@ public class MainActivity extends Activity {
                 listBox.addView(row);
 
                 View sep = new View(this);
-                sep.setLayoutParams(new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(1)));
+                sep.setLayoutParams(new LinearLayout.LayoutParams(
+                        ViewGroup.LayoutParams.MATCH_PARENT, dp(1)));
                 sep.setBackgroundColor(0xFFEEEEEE);
                 listBox.addView(sep);
+
+                if (posted > 0 && posted < loadedBefore) loadedBefore = posted;
+                else if (posted > 0 && loadedBefore == 0) loadedBefore = posted;
             }
         } finally {
             c.close();
         }
-        status.setText("本期 " + period + " · 在榜 " + n + " 帖（热榜上限 10）");
+        return n;
+    }
+
+    private static String oneLine(String s, int max) {
+        String t = s.replace('\n', ' ').replace('\r', ' ').trim();
+        return t.length() > max ? t.substring(0, max) + "…" : t;
+    }
+
+    static String timeText(long postedAt) {
+        if (postedAt <= 0) return "时间未知";
+        long now = System.currentTimeMillis() / 1000L;
+        long d = now - postedAt;
+        if (d < 60) return "刚刚";
+        if (d < 3600) return (d / 60) + " 分钟前";
+        if (d < 86400L) {
+            SimpleDateFormat f = new SimpleDateFormat("HH:mm", Locale.US);
+            return "今天 " + f.format(new Date(postedAt * 1000L));
+        }
+        if (d < 2 * 86400L) {
+            SimpleDateFormat f = new SimpleDateFormat("HH:mm", Locale.US);
+            return "昨天 " + f.format(new Date(postedAt * 1000L));
+        }
+        SimpleDateFormat f = new SimpleDateFormat("MM-dd HH:mm", Locale.US);
+        return f.format(new Date(postedAt * 1000L));
     }
 
     static String briefViews(int v) {
-        if (v >= 10000) return String.format("%.1fW", v / 10000.0);
-        if (v >= 1000) return String.format("%.1fK", v / 1000.0);
+        if (v >= 10000) return String.format(Locale.US, "%.1fW", v / 10000.0);
+        if (v >= 1000) return String.format(Locale.US, "%.1fK", v / 1000.0);
         return String.valueOf(v);
+    }
+
+    private void updateStatus() {
+        int threads = db.countThreads();
+        int comments = db.countComments();
+        int hist = db.countCommentHistory();
+        long lastTs = db.metaLong("last_fetch_ts", 0);
+        StringBuilder sb = new StringBuilder();
+        sb.append("共 ").append(threads).append(" 帖 · ").append(comments).append(" 条评论");
+        if (hist > 0) sb.append(" · ").append(hist).append(" 条评论留了旧版");
+        if (lastTs > 0) {
+            long h = (System.currentTimeMillis() - lastTs) / 3600000L;
+            sb.append(" · 上次抓取 ").append(h < 1 ? "不到 1" : String.valueOf(h)).append(" 小时前");
+            if (h >= 46) sb.append("（超 47 小时会有缺口）");
+        } else {
+            sb.append(" · 还没抓过");
+        }
+        status.setText(sb.toString());
     }
 
     // ---------------------------------------------------------------- 抓取
@@ -220,11 +327,11 @@ public class MainActivity extends Activity {
         pool.execute(new Runnable() {
             public void run() {
                 try {
-                    final String p = Fetcher.runOnce(MainActivity.this, tk);
+                    final String msg = Fetcher.runOnce(MainActivity.this, tk);
                     ui.post(new Runnable() {
                         public void run() {
-                            renderPeriod(p);
-                            Toast.makeText(MainActivity.this, "已存档 " + p, Toast.LENGTH_SHORT).show();
+                            reload();
+                            Toast.makeText(MainActivity.this, msg, Toast.LENGTH_LONG).show();
                         }
                     });
                 } catch (final Exception e) {
@@ -238,36 +345,64 @@ public class MainActivity extends Activity {
         });
     }
 
-    private void showHistory() {
-        Cursor c = db.allPeriods();
-        final String[] labels;
-        final String[] periods;
+    // ---------------------------------------------------------------- 统计
+
+    private void showStats() {
+        int threads = db.countThreads();
+        int comments = db.countComments();
+        int chist = db.countCommentHistory();
+        int dhist = 0;
+        Cursor c = db.getReadableDatabase().rawQuery(
+                "SELECT COUNT(*) FROM thread_detail_snap", null);
         try {
-            int n = c.getCount();
-            if (n == 0) {
-                Toast.makeText(this, "还没有历史期数", Toast.LENGTH_SHORT).show();
-                return;
-            }
-            labels = new String[n];
-            periods = new String[n];
-            for (int i = 0; i < n; i++) {
-                c.moveToNext();
-                periods[i] = c.getString(0);
-                labels[i] = periods[i] + "  （" + c.getInt(1) + " 帖）";
-            }
+            if (c.moveToFirst()) dhist = c.getInt(0);
         } finally {
             c.close();
         }
+        int rankEvents = 0;
+        c = db.getReadableDatabase().rawQuery("SELECT COUNT(*) FROM rank_event", null);
+        try {
+            if (c.moveToFirst()) rankEvents = c.getInt(0);
+        } finally {
+            c.close();
+        }
+        int imgRefs = 0;
+        c = db.getReadableDatabase().rawQuery("SELECT COUNT(*) FROM img_ref", null);
+        try {
+            if (c.moveToFirst()) imgRefs = c.getInt(0);
+        } finally {
+            c.close();
+        }
+
+        StringBuilder sb = new StringBuilder();
+        sb.append("帖子 ").append(threads).append(" 条（一条帖只有一行）\n");
+        sb.append("评论 ").append(comments).append(" 条（只增不删）\n");
+        sb.append("评论旧版 ").append(chist).append(" 条（被删前的原话）\n");
+        sb.append("正文旧版 ").append(dhist).append(" 条（改过的正文）\n");
+        sb.append("名次事件 ").append(rankEvents).append(" 条（只在名次变化时记）\n");
+        sb.append("图片 ").append(imgRefs).append(" 个 URL → ")
+                .append(ImgCache.size(this) / 1024).append(" KB 本地文件\n");
+        sb.append("图片按内容去重，同一张图只存一份\n");
+
+        long lastTs = db.metaLong("last_fetch_ts", 0);
+        if (lastTs > 0) {
+            SimpleDateFormat f = new SimpleDateFormat("MM-dd HH:mm", Locale.US);
+            sb.append("\n上次抓取：").append(f.format(new Date(lastTs)));
+            long h = (System.currentTimeMillis() - lastTs) / 3600000L;
+            sb.append("（").append(h).append(" 小时前）");
+        }
+
+        sb.append("\n\n抓取窗口：服务端只给最近 47.9 小时的时间流，");
+        sb.append("超过 47 小时没抓，中间那段的帖子就补不回来了。");
+
         new AlertDialog.Builder(this)
-                .setTitle("历史期数")
-                .setItems(labels, new DialogInterface.OnClickListener() {
-                    public void onClick(DialogInterface d, int which) {
-                        renderPeriod(periods[which]);
-                    }
-                })
-                .setNegativeButton("关闭", null)
+                .setTitle("存档统计")
+                .setMessage(sb.toString())
+                .setPositiveButton("关闭", null)
                 .show();
     }
+
+    // ---------------------------------------------------------------- 导出
 
     private static final int REQ_EXPORT = 41;
 
@@ -301,6 +436,8 @@ public class MainActivity extends Activity {
         }
     }
 
+    // ---------------------------------------------------------------- 设置
+
     private void showSettings() {
         final SharedPreferences sp = getSharedPreferences(PREF, MODE_PRIVATE);
 
@@ -331,6 +468,13 @@ public class MainActivity extends Activity {
         iv.setText(String.valueOf(AutoReceiver.intervalMin(this)));
         box.addView(iv);
 
+        TextView wHint = new TextView(this);
+        wHint.setText("\n注意：服务端时间流窗口约 47.9 小时。间隔设太大、或手机长时间断网，"
+                + "超过 47 小时那段的帖子就永久补不回来了。建议 30 分钟。");
+        wHint.setTextSize(12);
+        wHint.setTextColor(0xFFAA5500);
+        box.addView(wHint);
+
         new AlertDialog.Builder(this)
                 .setTitle("设置")
                 .setView(box)
@@ -344,9 +488,11 @@ public class MainActivity extends Activity {
                         } catch (Exception ignore) {
                         }
                         if (m < 15) m = 15;
-                        sp.edit().putInt(AutoReceiver.KEY_INTERVAL, m).putBoolean(AutoReceiver.KEY_ENABLED, true).apply();
+                        sp.edit().putInt(AutoReceiver.KEY_INTERVAL, m)
+                                .putBoolean(AutoReceiver.KEY_ENABLED, true).apply();
                         AutoReceiver.schedule(MainActivity.this, m);
-                        Toast.makeText(MainActivity.this, "已保存，每 " + m + " 分钟抓一次", Toast.LENGTH_SHORT).show();
+                        Toast.makeText(MainActivity.this, "已保存，每 " + m + " 分钟抓一次",
+                                Toast.LENGTH_SHORT).show();
                     }
                 })
                 .setNegativeButton("关闭自动抓取", new DialogInterface.OnClickListener() {
