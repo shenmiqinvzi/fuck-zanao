@@ -653,11 +653,15 @@ public class MainActivity extends Activity {
         } finally {
             c.close();
         }
-        int periods = db.countPeriods();
+        int periods = db.countPeriods() - db.countBackfillPeriods();
+        int backfill = db.countBackfillPeriods();
         int snaps = db.countSnapshots();
 
         StringBuilder sb = new StringBuilder();
         sb.append("热榜期数 ").append(periods).append(" 期（每轮一行，含整期榜面 JSON）\n");
+        if (backfill > 0) {
+            sb.append("另有 ").append(backfill).append(" 期是从 v3 名次事件回灌的残缺期（只有 2~3 条，不是完整榜面）\n");
+        }
         sb.append("期快照 ").append(snaps).append(" 行（每期每帖一行）\n");
         sb.append("帖子 ").append(threads).append(" 条（一条帖只有一行）\n");
         sb.append("评论 ").append(comments).append(" 条（只增不删）\n");
