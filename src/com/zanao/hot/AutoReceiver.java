@@ -41,8 +41,8 @@ public class AutoReceiver extends BroadcastReceiver {
                 try {
                     SharedPreferences sp = app.getSharedPreferences(PREF, Context.MODE_PRIVATE);
                     if (!sp.getBoolean(KEY_ENABLED, true)) return;
-                    String token = sp.getString(MainActivity.KEY_TOKEN, "");
-                    if (token.length() == 0) return;
+                    String token = MainActivity.tokenOf(app);
+                    if (!MainActivity.tokenOk(token)) return;
                     Fetcher.runScheduled(app, token);
                 } catch (Exception ignore) {
                 }

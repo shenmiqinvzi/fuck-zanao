@@ -49,10 +49,35 @@
 
 两种填法：
 
-1. **装好后填**：进 App → 设置 → 粘贴 token → 保存。
+1. **装好后填**：进 App → 设置 → 粘贴 token → 保存（**必须是 60 字符**，少/多一个字符都会报 errno 20，保存时会被拦下）。
 2. **构建时编进去**：`.\build.ps1 -Token "你的token"`，脚本会把 token 写进临时资源目录再打包，不改源码。
 
 token 从哪来：抓一次 App 的 HTTPS 流量（mitmproxy / Frida 均可），在 `X-Sc-Token` 头里。它是 URL-safe base64（60 字符，结尾 `=`），原样或 URL 编码都能用，**双重编码会挂**（errno 20）。
+
+### token 取值优先级（2026-11-01 修复）
+
+```
+1) 设置页手填 + 合法（token_manual=true 且长度 60 全 base64）  ← 最高
+2) APK 内置 R.string.default_token（合法就用，并回写 prefs）
+3) prefs 里的旧值（上面两个都不可用时兜底）
+```
+
+**为什么改**：旧实现是 `t = prefs.getString("token",""); if (t.length()==0) 才读内置值` ——
+只要 prefs 里存过任何非空字符串，APK 内置的正确 token 就永远不生效。典型翻车现场：
+
+- 某次把 token 手工抄错一个字符（`...FWmpsTThtmQ...`，**61 字符**，正确是 `...FWmpsTThtQ...`）
+- 那版装上去写进了 SharedPreferences
+- 之后换多少个正确的新包都报 `errno 20 登录中...`，因为 `tokenOf()` 见长度非 0 就直接用旧值
+
+现在 `MainActivity.tokenOk(String)` 卡死 `TOKEN_LEN == 60` + 全 base64 字符，
+`tokenOf(Context)` 先看手填标记，再拿内置值覆盖 prefs；设置页保存时手填值不合法会
+Toast 提示「token 必须是 60 字符 base64（现在 N 字符），没保存」并拒绝落盘。
+`AutoReceiver` 也改成走 `MainActivity.tokenOf(app)` + `tokenOk`，定时任务不再吃旧坏值。
+
+已实测复现与修复（Android 14 x86_64 模拟器）：
+手工把 61 字符坏 token 推进 `shared_prefs/zanao.xml` → 点刷新 → 状态栏
+`抓取失败：未登录（errno 20）：token 失效或为空，去设置页换一个新 token`；
+装新包启动后 prefs 里的 token 被自动改回 60 字符正确值，点刷新恢复正常抓取。
 
 ---
 
@@ -305,7 +330,8 @@ java "-Dfile.encoding=UTF-8" "-cp" "out\live;json.jar" ApiLiveTest "你的token"
 - **老帖正文不再可更新**：`/thread/info` 降级后，已入库的帖子没法再拉一次详情，`has_detail=0` 的历史遗留帖（本机 5 条，2026-10-31 20:12~20:22 那批）永远补不上。
 - **不能补历史**：回填段 / 滚动复查段已删除，装完只能从现在开始往后攒。
 - 只支持 zzu 一个站（alias 写死）。换学校要改 `Api.ALIAS`。
-- token 会过期，过期后 errno 20，去设置页换。
+- token 会过期，过期后 errno 20，去设置页换。**粘贴时务必数一遍长度是 60**：多一个字符（比如 `...TThtmQ...` 就是 61）服务端同样只回 `errno 20 登录中...`，看起来跟"过期"一模一样。
+- 如果换过好几个正确的新包还一直报 errno 20，先看设置页输入框里到底是什么值 —— 2026-11-01 之前的版本会让 prefs 里的旧坏值永久压住 APK 内置值（修复见上面「token 取值优先级」）。
 - 落盘的是 `@!sm_w400` 缩略图，**不是原图**。列表和详情页（显示宽度 660px）足够清晰；需要原图的场景（如另存、放大看细节）要自己拼 `@!common` 重新下。
 
 ---

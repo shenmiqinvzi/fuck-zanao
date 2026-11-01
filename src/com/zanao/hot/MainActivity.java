@@ -2,6 +2,7 @@ package com.zanao.hot;
 
 import android.app.Activity;
 import android.app.AlertDialog;
+import android.content.Context;
 import android.content.DialogInterface;
 import android.content.Intent;
 import android.content.SharedPreferences;
@@ -36,6 +37,10 @@ public class MainActivity extends Activity {
 
     static final String PREF = "zanao";
     static final String KEY_TOKEN = "token";
+    /** 用户是否在设置页手动改过 token（改过且合法才优先于 APK 内置值） */
+    static final String KEY_TOKEN_MANUAL = "token_manual";
+    /** 内置 token 的合法长度：服务端只认 60 字符 base64，多一个字符就 errno 20 */
+    static final int TOKEN_LEN = 60;
 
     private static final int PAGE = 50;
 
@@ -59,14 +64,44 @@ public class MainActivity extends Activity {
         }
     }
 
-    static String tokenOf(Activity a) {
-        SharedPreferences sp = a.getSharedPreferences(PREF, MODE_PRIVATE);
-        String t = sp.getString(KEY_TOKEN, "");
-        if (t.length() == 0) {
-            t = a.getString(R.string.default_token);
-            sp.edit().putString(KEY_TOKEN, t).apply();
+    /** 长度 60 且全是 base64 字符才算合法 token（服务端只认 60 字符，多一个字符就 errno 20） */
+    static boolean tokenOk(String t) {
+        if (t == null || t.length() != TOKEN_LEN) return false;
+        for (int i = 0; i < t.length(); i++) {
+            char c = t.charAt(i);
+            boolean b64 = (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z')
+                    || (c >= '0' && c <= '9') || c == '+' || c == '/' || c == '=';
+            if (!b64) return false;
         }
-        return t;
+        return true;
+    }
+
+    /**
+     * token 取值优先级：
+     *  1) 用户在设置页手填且合法的值（token_manual=true 且 tokenOk）
+     *  2) APK 内置值 R.string.default_token（合法就用它，并回写 prefs）
+     *  3) prefs 里的旧值（上面两者都不可用时兜底）
+     *
+     * 历史 bug：旧实现是"prefs 非空就直接返回"，于是旧安装包写进去的 61 字符坏 token
+     * 会永久压住新包内置的正确值，表现为"换了新 APK 还是 errno 20"。
+     */
+    static String tokenOf(Context a) {
+        SharedPreferences sp = a.getSharedPreferences(PREF, MODE_PRIVATE);
+
+        String builtin = a.getString(R.string.default_token);
+        if (builtin == null) builtin = "";
+        builtin = builtin.trim();
+
+        String cur = sp.getString(KEY_TOKEN, "");
+        if (cur == null) cur = "";
+        cur = cur.trim();
+
+        if (sp.getBoolean(KEY_TOKEN_MANUAL, false) && tokenOk(cur)) return cur;
+        if (tokenOk(builtin)) {
+            if (!builtin.equals(cur)) sp.edit().putString(KEY_TOKEN, builtin).apply();
+            return builtin;
+        }
+        return cur;
     }
 
     private String token() {
@@ -448,14 +483,16 @@ public class MainActivity extends Activity {
         box.setPadding(dp(16), dp(8), dp(16), dp(8));
 
         TextView hint = new TextView(this);
-        hint.setText("token 失效报 errno 20「登录中...」；社区别名固定 zzu（大小写敏感，改错报 errno 30）。");
+        hint.setText("token 必须是 60 字符 base64（长度差一个就报 errno 20「登录中...」）。"
+                + "APK 内置 token 优先；只有在这里手填且长度合法才会覆盖它。"
+                + "社区别名固定 zzu（大小写敏感，改错报 errno 30）。");
         hint.setTextSize(12);
         hint.setTextColor(0xFF666666);
         box.addView(hint);
 
         final EditText et = new EditText(this);
         et.setInputType(InputType.TYPE_CLASS_TEXT);
-        et.setText(sp.getString(KEY_TOKEN, token()));
+        et.setText(token());
         et.setHint("X-Sc-Token（60 字符 base64）");
         box.addView(et);
 
@@ -485,7 +522,17 @@ public class MainActivity extends Activity {
                 .setPositiveButton("保存", new DialogInterface.OnClickListener() {
                     public void onClick(DialogInterface d, int w) {
                         String t = et.getText().toString().trim();
-                        sp.edit().putString(KEY_TOKEN, t).apply();
+                        String builtin = getString(R.string.default_token);
+                        if (builtin == null) builtin = "";
+                        boolean manual = !t.equals(builtin.trim());
+                        if (manual && !tokenOk(t)) {
+                            Toast.makeText(MainActivity.this,
+                                    "token 必须是 60 字符 base64（现在 " + t.length()
+                                            + " 字符），没保存", Toast.LENGTH_LONG).show();
+                            return;
+                        }
+                        sp.edit().putString(KEY_TOKEN, t)
+                                .putBoolean(KEY_TOKEN_MANUAL, manual).apply();
                         int m = AutoReceiver.DEFAULT_INTERVAL;
                         try {
                             m = Integer.parseInt(iv.getText().toString().trim());
