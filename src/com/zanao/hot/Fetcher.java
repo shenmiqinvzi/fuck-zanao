@@ -102,18 +102,13 @@ public final class Fetcher {
                 // 热榜失败不影响时间流存档
             }
 
-            // ---------- 2A) 增量：从最新往回，碰到干净页就停 ----------
-            long fromTime = 0;
+            // ---------- 2A) 增量：只有最新 10 条可拿，一轮就够 ----------
+            // /thread/new/list?type=1 不可翻页（from_id 只能拿更新的，end_time 无效），
+            // 所以这里只取一次；多翻几页只会拿到同一批 10 条，白白打请求。
             long frontier = Long.MAX_VALUE;
-            boolean capped = true;
-            for (int p = 0; p < INCR_MAX_PAGES; p++) {
-                JSONArray page = feedWithRetry(api, fromTime);
-                if (page.length() == 0) {
-                    capped = false;
-                    break;
-                }
-                pages++;
-
+            JSONArray page = feedWithRetry(api, 0);
+            if (page.length() > 0) {
+                pages = 1;
                 Db.FeedResult fr = db.saveFeedPage(ts, page);
                 newThreads += fr.added.size();
                 if (fr.minPostedAt != Long.MAX_VALUE && fr.minPostedAt < frontier) {
@@ -124,123 +119,20 @@ public final class Fetcher {
                 changedComments += r[1];
                 imgOk += r[2];
                 imgFail += r[3];
-
-                if (fr.minPostedAt == Long.MAX_VALUE) {
-                    capped = false;
-                    break;
-                }
-                fromTime = fr.minPostedAt;
-
-                // 干净页 = 没有新帖、也没有评论数变化 → 增量结束
-                if (fr.added.size() == 0 && fr.needComments.size() == 0) {
-                    capped = false;
-                    break;
-                }
-                if (fromTime <= windowStart) {
-                    capped = false;
-                    break;
-                }
             }
             if (frontier != Long.MAX_VALUE) oldest = frontier;
 
-            // 游标语义（三种状态必须区分开，混在一起就会每轮重扫整个 47 小时窗口）：
-            //   -1 / 不存在 = 从没回填过（首次装机）→ 用本轮的 frontier 播种
-            //   >0          = 回填进行中 → 只能往回（更早）走，否则原地打转
-            //   0           = 回填已完成 → 不再播种，靠增量段 + 滚动段继续跟
-            // 只有增量段【翻满上限仍没碰到干净页】（长时间断网/首次运行）才需要开回填，
-            // 否则每轮都把游标设成 1 小时前的 frontier，回填段就要重扫 180 页。
-            if (capped && frontier != Long.MAX_VALUE) {
-                long cur = db.metaLong(K_BACKFILL, -1);
-                if (cur < 0) {
-                    db.setMeta(K_BACKFILL, String.valueOf(frontier));
-                } else if (cur > 0 && frontier < cur) {
-                    db.setMeta(K_BACKFILL, String.valueOf(frontier));
-                }
-            }
+            // 游标语义（历史遗留）：回填游标已不再使用，因为已无任何可向更早翻页的接口。
+            // 保留 K_BACKFILL 的读写只为兼容旧库里的 meta 行，本轮不再播种也不再推进。
 
-            // ---------- 2B) 回填：一次性把历史窗口补齐（做完就置 0，不再启动）----------
-            long cursor = db.metaLong(K_BACKFILL, 0);
-            long backfillDeadline = System.currentTimeMillis() + BACKFILL_BUDGET_MS;
-            if (deep && cursor > 0 && cursor > windowStart) {
-                for (int p = 0; p < BACKFILL_MAX_PAGES; p++) {
-                    if (System.currentTimeMillis() > backfillDeadline) break;
-                    JSONArray page = feedWithRetry(api, cursor);
-                    if (page.length() == 0) {
-                        cursor = 0;
-                        break;
-                    }
-                    pages++;
-
-                    Db.FeedResult fr = db.saveFeedPage(ts, page);
-                    newThreads += fr.added.size();
-                    if (fr.minPostedAt != Long.MAX_VALUE && fr.minPostedAt < oldest) {
-                        oldest = fr.minPostedAt;
-                    }
-                    int[] r = processThreads(ctx, api, db, ts, fr.added, fr.needDetail, fr.needComments);
-                    newComments += r[0];
-                    changedComments += r[1];
-                    imgOk += r[2];
-                    imgFail += r[3];
-
-                    if (fr.minPostedAt == Long.MAX_VALUE) {
-                        cursor = 0;
-                        break;
-                    }
-                    cursor = fr.minPostedAt;
-                    if (cursor <= windowStart) {
-                        cursor = 0;   // 到窗口边界，回填完成
-                        break;
-                    }
-                }
-                db.setMeta(K_BACKFILL, String.valueOf(cursor));
-            }
-
-            // ---------- 2C) 滚动复查：老帖的评论只增不减，所以必须慢慢往回刷一遍 ----------
-            // 每轮只花 REFRESH_BUDGET_MS 的时间预算，走到窗口底就置 0，下一轮从最新重新开始。
-            // 这样"刷新只刷评论"能覆盖到全部历史帖，又不会一轮重扫 180 页。
-            long rcursor = db.metaLong(K_REFRESH, 0);
-            long refreshDeadline = System.currentTimeMillis() + REFRESH_BUDGET_MS;
-            if (rcursor <= 0) {
-                rcursor = ts / 1000L;   // 新一轮滚动：从最新开始往回
-            }
+            // ---------- 2B/2C) 回填与滚动复查：2026-11-01 起停用 ----------
+            // /thread/search、/thread/list、/thread/v2/list 全部被服务端降级成空列表，
+            // 现在唯一的源是 /thread/new/list?type=1：永远只有最新 10 条，且 from_id 只能
+            // 拿到更新的、拿不到更旧的 —— 也就是说没有任何往更早翻页的手段。
+            // 因此回填段与滚动复查段无法再推进（每页都是同一批 10 条），必须停用，
+            // 否则会白跑 200 页 × N 次请求。历史窗口内的帖子只能靠"提高轮询频率"来覆盖。
+            long cursor = 0;
             int refreshPages = 0;
-            if (deep && rcursor > windowStart) {
-                for (int p = 0; p < REFRESH_MAX_PAGES; p++) {
-                    if (System.currentTimeMillis() > refreshDeadline) break;
-                    JSONArray page;
-                    try {
-                        page = feedWithRetry(api, rcursor);
-                    } catch (Exception e) {
-                        break;   // 滚动段失败不影响本轮结果，下次接着来
-                    }
-                    if (page.length() == 0) {
-                        rcursor = 0;
-                        break;
-                    }
-                    refreshPages++;
-                    pages++;
-
-                    Db.FeedResult fr = db.saveFeedPage(ts, page);
-                    newThreads += fr.added.size();
-                    // 滚动段只补评论，不补 info（正文只在增量段和回填段拉）
-                    int[] r = processThreads(ctx, api, db, ts, fr.added, fr.needDetail, fr.needComments);
-                    newComments += r[0];
-                    changedComments += r[1];
-                    imgOk += r[2];
-                    imgFail += r[3];
-
-                    if (fr.minPostedAt == Long.MAX_VALUE) {
-                        rcursor = 0;
-                        break;
-                    }
-                    rcursor = fr.minPostedAt;
-                    if (rcursor <= windowStart) {
-                        rcursor = 0;   // 走到底，下一轮从最新重新开始
-                        break;
-                    }
-                }
-                db.setMeta(K_REFRESH, String.valueOf(rcursor));
-            }
 
             // ---------- 3) 收尾 ----------
             // 顺手把历史遗留的原图换成缩略图（先下新图、再删旧图，失败则保留）
@@ -296,9 +188,21 @@ public final class Fetcher {
 
         for (String tid : added) {
             try {
-                JSONObject detail = api.info(tid);
+                // /thread/info 已被服务端降级（detail 恒为空），但 new/list 的 item 自带
+                // 完整字段，saveFeedPage 已把整条 JSON 落进 detail_json。
+                // 所以先读库里的 detail_json：带 img_paths 就直接用，不再浪费一次 info 请求。
+                JSONObject detail = db.thread(tid);
+                if (detail == null || !detail.has("img_paths")) {
+                    try {
+                        JSONObject d2 = api.info(tid);
+                        if (d2 != null) {
+                            db.saveThreadDetail(ts, d2);
+                            detail = d2;
+                        }
+                    } catch (Exception ignore) {
+                    }
+                }
                 if (detail != null) {
-                    db.saveThreadDetail(ts, detail);
                     int[] g = fetchThreadImages(ctx, detail);
                     imgOk += g[0];
                     imgFail += g[1];

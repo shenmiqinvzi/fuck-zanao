@@ -392,8 +392,10 @@ public class MainActivity extends Activity {
             sb.append("（").append(h).append(" 小时前）");
         }
 
-        sb.append("\n\n抓取窗口：服务端只给最近 47.9 小时的时间流，");
-        sb.append("超过 47 小时没抓，中间那段的帖子就补不回来了。");
+        sb.append("\n\n抓取窗口：2026-11-01 起服务端把 /thread/search、/thread/list、");
+        sb.append("/thread/v2/list 三个时间流接口全部降级成空列表，只剩 /thread/new/list 可用，");
+        sb.append("而它永远只返回最新 10 条、不能翻页。所以现在只能靠高频轮询覆盖，");
+        sb.append("间隔设太大就会漏帖（建议 2 分钟）。");
 
         new AlertDialog.Builder(this)
                 .setTitle("存档统计")
@@ -458,7 +460,7 @@ public class MainActivity extends Activity {
         box.addView(et);
 
         TextView ivHint = new TextView(this);
-        ivHint.setText("\n自动抓取间隔（分钟，最小 15）：");
+        ivHint.setText("\n自动抓取间隔（分钟，最小 " + AutoReceiver.MIN_INTERVAL + "）：");
         ivHint.setTextSize(12);
         ivHint.setTextColor(0xFF666666);
         box.addView(ivHint);
@@ -469,8 +471,10 @@ public class MainActivity extends Activity {
         box.addView(iv);
 
         TextView wHint = new TextView(this);
-        wHint.setText("\n注意：服务端时间流窗口约 47.9 小时。间隔设太大、或手机长时间断网，"
-                + "超过 47 小时那段的帖子就永久补不回来了。建议 30 分钟。");
+        wHint.setText("\n注意：2026-11-01 起服务端三个时间流接口全部降级，只剩"
+                + " /thread/new/list 可用，它永远只回最新 10 条、不能翻页。"
+                + "实测新帖约每分钟 3~9 条，间隔超过 1~2 分钟就会有帖子滑出窗口永久抓不到。"
+                + "建议设 2 分钟（最小 1 分钟）。");
         wHint.setTextSize(12);
         wHint.setTextColor(0xFFAA5500);
         box.addView(wHint);
@@ -482,12 +486,12 @@ public class MainActivity extends Activity {
                     public void onClick(DialogInterface d, int w) {
                         String t = et.getText().toString().trim();
                         sp.edit().putString(KEY_TOKEN, t).apply();
-                        int m = 30;
+                        int m = AutoReceiver.DEFAULT_INTERVAL;
                         try {
                             m = Integer.parseInt(iv.getText().toString().trim());
                         } catch (Exception ignore) {
                         }
-                        if (m < 15) m = 15;
+                        if (m < AutoReceiver.MIN_INTERVAL) m = AutoReceiver.MIN_INTERVAL;
                         sp.edit().putInt(AutoReceiver.KEY_INTERVAL, m)
                                 .putBoolean(AutoReceiver.KEY_ENABLED, true).apply();
                         AutoReceiver.schedule(MainActivity.this, m);

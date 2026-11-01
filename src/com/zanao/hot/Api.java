@@ -200,12 +200,32 @@ public final class Api {
      */
     public static final long FEED_WINDOW_SEC = 47L * 3600;   // 47h，48h 起服务端归零
 
+    /**
+     * 时间流（2026-11-01 第二次降级后的唯一可用源）。
+     *
+     * 实测：/thread/v2/list、/thread/list、/thread/search 三个接口当天上午全部返回空列表
+     * （{"list":[],"total":0}），参数/版本号/GET-POST/client 头全试过，是服务端统一降级，
+     * 不是签名或 token 问题（同一 token 下 hot / new/list / comment/list 全部正常）。
+     *
+     * 目前唯一还能返回【新帖列表 + 标题 + 全文 + 图片路径 + 计数】的是：
+     *   GET /thread/new/list?type=1   → 最新 10 条，32 字段，content 是全文不是摘要
+     * 关键限制：
+     *  - type 必须带（不带则返回 {"list":[],"count":"722"}）
+     *  - count / page / offset / end_time / from_time / last_id… 全部无效，永远同一批 10 条
+     *  - from_id 只能过滤出比它更新的（id > from_id），拿不到更旧的 → 无法翻页
+     * 所以这里【忽略 fromTime】，每次就取当前最新 10 条；漏帖只能靠提高轮询频率来补。
+     * 返回的 item 字段齐全（含 img_paths / c_count / l_count / is_anon），可以直接当详情用，
+     * 不需要再打已失效的 /thread/info。
+     */
     public JSONArray feed(long fromTime) throws Exception {
+        return newest();
+    }
+
+    /** /thread/new/list?type=1 —— 最新 10 条新帖（不可翻页） */
+    public JSONArray newest() throws Exception {
         LinkedHashMap<String, String> p = new LinkedHashMap<>();
-        p.put("count", "10");
-        // end_time 缺省时服务器按当前时间返回最新一批；显式传当前秒语义更明确
-        p.put("end_time", String.valueOf(fromTime > 0 ? fromTime : System.currentTimeMillis() / 1000L));
-        JSONObject r = request("/thread/search", p);
+        p.put("type", "1");
+        JSONObject r = request("/thread/new/list", p);
         if (r.optInt("errno", -1) != 0) {
             throw new IOException2(errnoText(r.optInt("errno"), r.optString("errmsg")));
         }

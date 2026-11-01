@@ -10,12 +10,18 @@ import android.os.Build;
 import android.os.SystemClock;
 
 /**
- * 定时抓取：用 AlarmManager（不引 androidx，纯框架 API）
+ * 定时抓取：用 AlarmManager（不引 androidx，纯框架 API）。
  *
  * 为什么不用 WorkManager：WorkManager 属于 androidx，需要额外 aar 依赖，
- * 而本项目零依赖手搓 APK。AlarmManager.setInexactRepeating 的最小间隔是 15 分钟，
- * 与文档 §7 的"最小 15m"一致；这里用 setExactAndAllowWhileIdle 链式重排，
+ * 而本项目零依赖手搓 APK。AlarmManager.setAndAllowWhileIdle 链式重排，
  * 精度更好且不受 Doze 影响。
+ *
+ * 2026-11-01：/thread/search、/thread/list、/thread/v2/list 三个时间流接口
+ * 全部被服务端降级成空列表，只剩 /thread/new/list?type=1 可用，而它永远
+ * 只返回最新 10 条、不可翻页。因此"抓取间隔"直接决定了漏帖率：
+ * 实测新帖速率约 1~3 条/20 秒，也就是每分钟 3~9 条；而窗口只有 10 条，
+ * 换句话说间隔超过 1~2 分钟就必然有帖子从窗口里滑出去、永久抓不到。
+ * 默认间隔因此从 30 分钟下调到 2 分钟，下限也从 15 分钟放宽到 1 分钟。
  */
 public class AutoReceiver extends BroadcastReceiver {
 
@@ -23,11 +29,12 @@ public class AutoReceiver extends BroadcastReceiver {
     static final String PREF = "zanao";
     static final String KEY_INTERVAL = "interval_min";
     static final String KEY_ENABLED = "auto_enabled";
-    static final int DEFAULT_INTERVAL = 30;
+    static final int DEFAULT_INTERVAL = 2;
+    static final int MIN_INTERVAL = 1;
 
     @Override
     public void onReceive(Context ctx, Intent intent) {
-        // 抓取放到后台线程，BroadcastReceiver 的 onReceive 只有 10 秒
+        // 抓取放到后台线程：BroadcastReceiver 的 onReceive 只有 10 秒
         final Context app = ctx.getApplicationContext();
         new Thread(new Runnable() {
             public void run() {
@@ -46,12 +53,14 @@ public class AutoReceiver extends BroadcastReceiver {
 
     static int intervalMin(Context ctx) {
         SharedPreferences sp = ctx.getSharedPreferences(PREF, Context.MODE_PRIVATE);
-        return sp.getInt(KEY_INTERVAL, DEFAULT_INTERVAL);
+        int m = sp.getInt(KEY_INTERVAL, DEFAULT_INTERVAL);
+        if (m < MIN_INTERVAL) m = MIN_INTERVAL;
+        return m;
     }
 
-    /** 排下一次。间隔低于 15 分钟按 15 分钟算（AlarmManager 硬下限） */
+    /** 排下一次。间隔低于 MIN_INTERVAL 按 MIN_INTERVAL 算 */
     static void schedule(Context ctx, int minutes) {
-        if (minutes < 15) minutes = 15;
+        if (minutes < MIN_INTERVAL) minutes = MIN_INTERVAL;
         AlarmManager am = (AlarmManager) ctx.getSystemService(Context.ALARM_SERVICE);
         if (am == null) return;
         Intent i = new Intent(ctx, AutoReceiver.class);

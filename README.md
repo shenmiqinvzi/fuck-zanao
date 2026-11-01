@@ -10,18 +10,17 @@
 
 | 功能 | 说明 |
 |---|---|
-| 时间流抓取 | `/thread/search` 按 `end_time` 往前翻，最多回溯 **47 小时**（接口硬窗口），逐页入库 |
+| 新帖抓取 | `/thread/new/list?type=1` 取最新 10 条入库（**该接口不能翻页**，靠高频轮询覆盖窗口） |
 | 热榜名次 | `/thread/hot` top 10 只在**名次变化时**记一行（`rank_event`），列表里显示「榜N」角标 |
 | 帖子存档 | 正文、作者、发帖时间、帖内图片、原帖短链、浏览/赞/收藏 |
 | 正文版本化 | 正文 md5 变了才留旧版（`thread_detail_snap`），作者编辑后旧正文不丢 |
 | 评论存档 | 全量一级评论 + 楼中楼（`root_comment_id` 挂载，缩进显示） |
 | 评论原话留存 | 评论被删时**先把原话存进 `comment_content_snap` 再覆盖**，界面上紫底显示「（原话）」 |
 | 图片本地化 | 帖图 + 评论图 + 头像全部下载到 `files/img/`，**按图片内容 md5 命名**（同图不同 URL 只存一份），落盘一律 `@!sm_w400` 缩略图 |
-| 手动刷新 | 只跑**增量段**（从最新往回翻到干净页就停），通常 4~10 页、几秒到几十秒 |
-| 断点回填 | 首次装机时增量翻满页数上限还没碰到干净页，就把游标写进 `meta.backfill_cursor`，把 47h 历史一次性补齐，做完置 0 不再启动 |
-| 滚动复查 | 定时任务才跑：老帖评论只增不减，用 `meta.refresh_cursor` 每轮花 3 分钟往回刷一段，走到窗口底就重置，慢慢覆盖全部历史帖 |
+| 手动刷新 | 打一次 `/thread/new/list?type=1`，几十秒内完成 |
+| 断点回填 / 滚动复查 | **已停用（2026-11-01）**。原来靠 `/thread/search` 的 `end_time` 游标往回补历史，该接口降级成空列表后已没有任何能向更早翻页的接口，代码里这两段整体删除；`meta` 里的 `backfill_cursor` / `refresh_cursor` 只作历史残留读取 |
 | 离线可用 | 断网/飞行模式下照常浏览已存档内容，图片照常显示 |
-| 定时抓取 | AlarmManager 链式重排，间隔下限 15 分钟（默认 30），开机自启重排 |
+| 定时抓取 | AlarmManager 链式重排，间隔下限 **1 分钟**（默认 **2**），开机自启重排。因为 new/list 只有 10 条窗口，间隔太大必漏帖 |
 | 一键导出 | 把 db + 全部图片打成 zip，走 SAF 存到任意位置（不要存储权限） |
 
 ### 为什么不是"每期存一份快照"
@@ -105,7 +104,7 @@ token 从哪来：抓一次 App 的 HTTPS 流量（mitmproxy / Frida 均可）�
 ### 三级采集链
 
 ```
-GET  /thread/search?count=10&end_time=<unix秒>   → data.list（时间流，窗口约 47h）
+GET  /thread/new/list?type=1                     → data.list（最新 10 条，不可翻页）
 GET  /thread/hot?count=10&type=3                 → data.list（rank 1..10，只有 top 10）
 GET  /thread/info?id=<tid>                       → data.detail（72 字段）+ data.t_sign
 GET  /comment/list?id=<tid>                      → data.total + data.list（一级 + 楼中楼）
@@ -120,16 +119,46 @@ GET  /comment/list?id=<tid>                      → data.total + data.list（�
 > `/thread/info`、`/comment/list`、`/thread/toplist` 在同一 token 同一签名下全部正常，
 > 所以不是签名/token/时钟问题，是平台下线了该接口。
 >
-> 替代接口是 **`/thread/search`**：它的 `keyword` 参数完全无效（传什么都返回同一批帖子），
+> 当时的替代接口是 **`/thread/search`**：它的 `keyword` 参数完全无效（传什么都返回同一批帖子），
 > 实际上就是个纯时间流，用 `end_time`（unix 秒）作游标，返回 `p_time < end_time` 的帖子。
+>
+> **2026-11-01 11:19 二次变更：`/thread/search` 也降级了。** 现在它对
+> `end_time=now / now-1h / now-6h / now-24h / now-40h / 0 / 无参数`、`keyword`、
+> `page`、`p_time`、`search_type`、`scope`、`cate_id`、`sort`、`cid` / `alias` /
+> `community_id`、GET 与 POST、版本号 `3.1.0`~`4.0.0` **一律返回
+> `{"errno":0,"errmsg":"","data":{"list":[],"total":0,"is_finish":false,"search_tip":"","end_time":0}}`**
+> （`end_time` 回显恒 0，不再回显传入值）。`/thread/list`、`/thread/search/v2`、
+> `/thread/search/v3` 同样空。`/thread/info` 也一起废了 —— 对老帖和新帖都返回
+> `{"errno":0,...,"data":{"is_show":false,"forbid_tip":"","empty_tip":"帖子不存在或已删除","detail":[]}}`，
+> `detail` 是**空 list**（145 字节），换 `id` / `thread_id` / `tid` / `cid` / `alias` /
+> `type` / `sign` / `with_comment` / `with_reply` / `from_app`、GET/POST、版本
+> `3.0.0`~`4.0.0` 全部一样。
+>
+> **现在唯一还活着的取数路径：**
+>
+> | 接口 | 状态 |
+> |---|---|
+> | `/thread/new/list?type=1` | 可用：最新 10 条，33 字段（含 `content` 全文、`img_paths`、`is_anon`、`c_count`），**不能翻页** |
+> | `/thread/hot` | 可用：top 10，25 字段 |
+> | `/thread/toplist` | 可用：1 条 |
+> | `/comment/list?id=<tid>` | 可用：对已知 id 正常，条数与 `c_count` 一致 |
+> | `/thread/search` · `/thread/list` · `/thread/v2/list` · `/thread/info` | 降级为空 |
+>
+> `new/list` 的等价别名（返回完全相同的 10 条）：`/thread/newest`、
+> `/thread/new/list/v2`、`/thread/new/list2`、`/thread/new`。它们**都不支持
+> `end_time` / `from_id` 向更早翻页**，`from_id` 只能过滤出更新的那批。
+>
+> 后果：`new/list` 窗口只有 10 条，而实测新帖速率约 **1~3 条/20 秒**（每分钟 3~9 条），
+> 所以抓取间隔必须压到 1~2 分钟才不会滑出窗口 —— 这也是默认间隔从 30 分钟改成 2 分钟、
+> 下限从 15 分钟放宽到 1 分钟的原因。
 
 ### 参数的真实边界（文档里写错的都在这里）
 
 | 项 | 实测结论 |
 |---|---|
-| `count` | 上限 **10**。`/thread/search` 的 count 也完全无效，传 `1/5/20/50/100` 都回 9~10 条 |
-| `end_time` | **`/thread/search` 唯一有效的翻页参数**（unix 秒），返回 `p_time < end_time` 的帖子。第一页传当前秒，后续传上一页的 `min(p_time)`。`p_time` 也是 unix 秒字符串。**有效窗口约 47 小时**：`-47h` 还有 9 条，`-48h` 起 `total=0` 返回空列表（errno 0，不报错） |
-| `from_id` | `/thread/new/list` 的唯一有效参数，但语义是「id > from_id 的下限过滤」，**只能拿到更新的帖子，拿不到更旧的** |
+| `count` | 上限 **10**。`/thread/search` 与 `/thread/new/list` 的 count 都完全无效（`1/5/10/20/30/50/100/200` 一律 9~10 条） |
+| `end_time` | 曾经是 `/thread/search` 唯一有效的翻页参数（返回 `p_time < end_time`，窗口约 47h：`-47h` 还有 9 条、`-48h` 起 `total=0`）。**2026-11-01 11:19 起该接口整体降级，`end_time` 彻底无效，`total` 恒 0** |
+| `from_id` | `/thread/new/list` 的唯一有效参数，语义是「id > from_id 的下限过滤」，**只能拿到更新的帖子，拿不到更旧的**（传末条 id 会回 9 条，传更小的 id 又跳回最新 10 条） |
 | 其余分页参数 | `page` / `offset` / `last_id` / `cursor` / `last_rank` / `from_time`（对 search）… 全部无效 |
 | `type` | **字段丰富度开关**。省略或 `=1` 只回 **8** 个字段；`0/2/3/4…` 回 **25** 个字段。**不影响排名**，只影响字段。`/thread/new/list` 则相反：**不带 `type` 返回空，带任意 type 值才返回 10 条** |
 | `sign` | `/comment/list` 的 `t_sign` **完全可省**，传 `"AAAA"` 也回一样的数据 |
@@ -201,10 +230,10 @@ src/com/zanao/hot/
   Sign.java          makeSign 算法（零 Android 依赖，桌面 JVM 可直接跑）
   Api.java           四个接口 + 12 个 header + errno 翻译 + 图片下载 + 缩略图 URL
   Db.java            8 张表 + 内容版本化 + 评论按 root 归并排序
-  Fetcher.java       一轮抓取：热榜名次 → 增量段 → 断点回填段 → 图片缩略化
+  Fetcher.java       一轮抓取：热榜名次 → new/list 单页 → 评论/图片 → 缩略化（回填与复查段已停用）
   ImgCache.java      图片永久缓存（按内容 md5 命名、@!sm_w400、shrink/gcOrphans）
   Exporter.java      打包 zip 导出（SAF，无需存储权限）
-  AutoReceiver.java  AlarmManager 链式定时（下限 15 分钟）
+  AutoReceiver.java  AlarmManager 链式定时（下限 1 分钟，默认 2）
   BootReceiver.java  开机重排定时
   App.java           全局崩溃捕获（写 files/crash.log）
   MainActivity.java  时间流 / 统计 / 设置 / 导出
@@ -272,8 +301,9 @@ java "-Dfile.encoding=UTF-8" "-cp" "out\live;json.jar" ApiLiveTest "你的token"
 - **没在真手机上验过**。全部验证在 Android 14 x86_64 模拟器（WHPX 加速，720×1280）。
 - 国产 ROM 需要手动在「电池优化 / 自启动」里给「赞奥热榜」放行，否则后台 AlarmManager 会被杀。
 - 热榜只有前 10，拿不到 11+。这是接口硬限制，不是没做。
-- **时间流只能回溯 47 小时**。更早的帖子接口不给了（`end_time` 超过 48h 直接返回空列表，`total=0`），所以第一次装必须靠回填段把 47h 一次性补完。
-- **`/thread/v2/list` 已失效**（2026-11-01 起固定返回空列表），本项目改用 `/thread/search`。如果哪天 search 也挂了，备选是 `/thread/new/list?type=1`（只给最新 10 条，`from_id` 只能往前不能往后）。
+- **抓不全**：`/thread/v2/list`、`/thread/search`、`/thread/list`、`/thread/info` 在 2026-11-01 先后被服务端降级成空列表 / 空 detail，只剩 `/thread/new/list?type=1`（最新 10 条、不可翻页）能拿新帖。窗口只有 10 条而新帖速率约每分钟 3~9 条，**间隔压到 1~2 分钟仍可能漏**，手机休眠 / 断网时段漏掉的帖子永久补不回来。
+- **老帖正文不再可更新**：`/thread/info` 降级后，已入库的帖子没法再拉一次详情，`has_detail=0` 的历史遗留帖（本机 5 条，2026-10-31 20:12~20:22 那批）永远补不上。
+- **不能补历史**：回填段 / 滚动复查段已删除，装完只能从现在开始往后攒。
 - 只支持 zzu 一个站（alias 写死）。换学校要改 `Api.ALIAS`。
 - token 会过期，过期后 errno 20，去设置页换。
 - 落盘的是 `@!sm_w400` 缩略图，**不是原图**。列表和详情页（显示宽度 660px）足够清晰；需要原图的场景（如另存、放大看细节）要自己拼 `@!common` 重新下。

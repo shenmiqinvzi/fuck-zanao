@@ -521,6 +521,13 @@ public class Db extends SQLiteOpenHelper {
                     c.close();
                 }
 
+                // 2026-11-01 起 /thread/info 已被服务端降级（detail 恒为空 list），
+                // 但 /thread/new/list 的 item 自带 32 个字段（含 content 全文、img_paths、
+                // c_count、l_count、is_anon、nickname…），足够当详情用。
+                // 判定"rich"：同时带 img_paths 和 c_count 两个键 → 视为完整帖，直接落 detail_json
+                // 并把 has_detail 置 1，避免每轮都去补那个已经拿不到正文的 info。
+                boolean rich = t.has("img_paths") && t.has("c_count");
+
                 ContentValues v = new ContentValues();
                 v.put("thread_id", tid);
                 v.put("last_seen", ts);
@@ -557,6 +564,13 @@ public class Db extends SQLiteOpenHelper {
                     }
                     v.put("content", content);
                     v.put("content_md5", newMd5);
+                }
+
+                if (rich) {
+                    // item 本身就够当详情：整条 JSON 存进 detail_json（含 img_paths 等
+                    // 只在 detail 里才有的字段），并把 has_detail 置 1
+                    v.put("detail_json", t.toString());
+                    v.put("has_detail", 1);
                 }
 
                 if (!exists) {
