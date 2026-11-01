@@ -1,6 +1,8 @@
 # 赞奥热榜（zanao-hot）
 
-把郑州大学「赞奥校园集市」（cid=zzu）的**全部帖子**（时间流 + 热榜名次）连同**帖子正文、全部评论、全部图片**一起永久存进手机本地 SQLite。
+把郑州大学「赞奥校园集市」（cid=zzu）的**热榜**连同**每期完整榜面、帖子正文、全部评论、全部图片**一起永久存进手机本地 SQLite。
+
+每一轮抓取都会存成**一期**：期头一行（`hot_period`，含整期榜面 JSON）+ 该期每帖一行（`rank_snapshot`）。所以你随时可以回看「某个时刻热榜长什么样、谁第几名、热度多少」。
 
 平台会把帖子下架、把评论删掉、把正文改掉。这个 App 的思路很简单：**在它还活着的时候，把整份内容（文字 + 图片）搬到自己手机上**，并且**每一次内容变化都留旧版**。之后不管平台怎么删改，你本地那份还在，断网也照样能翻。
 
@@ -10,34 +12,44 @@
 
 | 功能 | 说明 |
 |---|---|
-| 新帖抓取 | `/thread/new/list?type=1` 取最新 10 条入库（**该接口不能翻页**，靠高频轮询覆盖窗口） |
-| 热榜名次 | `/thread/hot` top 10 只在**名次变化时**记一行（`rank_event`），列表里显示「榜N」角标 |
+| 热榜抓取 | 每轮打一次 `/thread/hot?count=10&type=3`，取 rank 1~10，**存成一期**（期头 + 每帖一行榜面） |
+| 实时热榜页 | 展示最新一期的 rank 徽标 / 标题 / 热度 `hot_val` / 浏览 `hot_text` / 评论数 / 赞数，前三名橙底大字 |
+| 历史期数页 | 按 `ts` 倒序列出所有期，点进去可回看那一期的完整榜面 |
+| 名次轨迹 | `rank_event` 只在名次变化时记一行，帖子详情页底部显示「第 N 名（时间）」 |
+| 全部帖 | 时间流页签，按发帖时间倒序翻全部已入库帖子，带「榜N」角标 |
 | 帖子存档 | 正文、作者、发帖时间、帖内图片、原帖短链、浏览/赞/收藏 |
 | 正文版本化 | 正文 md5 变了才留旧版（`thread_detail_snap`），作者编辑后旧正文不丢 |
 | 评论存档 | 全量一级评论 + 楼中楼（`root_comment_id` 挂载，缩进显示） |
 | 评论原话留存 | 评论被删时**先把原话存进 `comment_content_snap` 再覆盖**，界面上紫底显示「（原话）」 |
 | 图片本地化 | 帖图 + 评论图 + 头像全部下载到 `files/img/`，**按图片内容 md5 命名**（同图不同 URL 只存一份），落盘一律 `@!sm_w400` 缩略图 |
-| 手动刷新 | 打一次 `/thread/new/list?type=1`，几十秒内完成 |
+| 手动刷新 | 打一次 `/thread/hot`，几十秒内完成（存一期 + 拉在榜帖评论/图片） |
 | 断点回填 / 滚动复查 | **已停用（2026-11-01）**。原来靠 `/thread/search` 的 `end_time` 游标往回补历史，该接口降级成空列表后已没有任何能向更早翻页的接口，代码里这两段整体删除；`meta` 里的 `backfill_cursor` / `refresh_cursor` 只作历史残留读取 |
 | 离线可用 | 断网/飞行模式下照常浏览已存档内容，图片照常显示 |
-| 定时抓取 | AlarmManager 链式重排，间隔下限 **1 分钟**（默认 **2**），开机自启重排。因为 new/list 只有 10 条窗口，间隔太大必漏帖 |
+| 定时抓取 | AlarmManager 链式重排，间隔下限 **5 分钟**（默认 **15**），开机自启重排。热榜前 10 变化很慢，不需要高频轮询 |
 | 一键导出 | 把 db + 全部图片打成 zip，走 SAF 存到任意位置（不要存储权限） |
 
-### 为什么不是"每期存一份快照"
+### 为什么又回到"每期存一份快照"（v4，2026-11-01）
 
-早期版本（v1）确实按「期」存 `rank_snapshot`，同帖跨 4 期就有 4 行。但每行只有 65 字节（rank / hot_val / 浏览量 / 评论数 / 赞数 / 标题 / 分类），**不含正文和评论** —— 那是名次轨迹，不是冗余副本。
+v2/v3 一度把期快照删掉了，理由是「名次只在变化时记一行就够了」。这个取舍是错的 ——
+它把「某个时刻热榜长什么样」这个信息永久丢掉了：`rank_event` 只记变化过的帖，
+所以历史期里永远只有 2~3 条，不是完整榜面（本机实测 16 个伪期全部只有 2 条）。
 
-现在（v3）更彻底：`threads` 以 `thread_id` 为主键天然一帖一行；`comments` 以 `comment_id` 为主键天然一条一行；只有**内容真的变了**才额外留一行历史。实测 1372 帖 / 4314 评论，`thread_id IS NULL` 0 行、重复组 0 组。
+v4 恢复期快照，并且**和存档不冲突**：
+- `rank_snapshot` 每期每帖一行（`rank` / `hot_val` / `hot_text` / `view_count` / `c_count` / `l_count` / `title` / `raw_json`），**哪怕名次没变也写**；
+- `hot_period` 每期一行，`raw_json` 存整期榜面条目，可以完整还原那一期的榜面；
+- `threads` 仍以 `thread_id` 为主键一帖一行，`comments` 仍以 `comment_id` 为主键一条一行，正文/评论只有**内容真的变了**才额外留历史。
+
+一行榜面约 200 字节，一轮 10 行 = 2 KB。按 15 分钟一轮算，一天 96 期 ≈ 200 KB —— 存一年也就 70 MB，完全不值得为省这点空间丢掉「历史榜面」。
 
 ---
 
 ## 装哪个
 
-`dist/zanao_hot_1.0.apk`（371,000 字节）—— 自签名，装之前要允许「安装未知来源应用」。
+`dist/zanao_hot_1.0.apk`（379,192 字节）—— 自签名，装之前要允许「允许安装未知来源应用」。
 
 - 包名 `com.zanao.hot`，versionCode 1 / versionName 1.0
 - minSdk 24（Android 7.0）/ targetSdk 34
-- 已在 **Android 14 x86_64 模拟器**上跑通全链路（抓取 1372 帖 / 4314 评论 / 678 图 · 入库 · 看图 · 离线 · 定时 · 导出）
+- 已在 **Android 14 x86_64 模拟器**上跑通全链路（热榜 10 条存成一期 · 1029 帖 / 2977 评论 / 540 图 · 三个页签 · 详情页 · 离线 · 定时 · 导出）
 
 **注意**：仓库里的 APK 是**不带 token** 的版本（见下面「token」一节），装上后要在设置页填自己的 token 才能抓。
 
@@ -129,11 +141,16 @@ Toast 提示「token 必须是 60 字符 base64（现在 N 字符），没保存
 ### 三级采集链
 
 ```
-GET  /thread/new/list?type=1                     → data.list（最新 10 条，不可翻页）
-GET  /thread/hot?count=10&type=3                 → data.list（rank 1..10，只有 top 10）
-GET  /thread/info?id=<tid>                       → data.detail（72 字段）+ data.t_sign
+GET  /thread/hot?count=10&type=3                 → data.list（rank 1..10，**主源**，自带全文）
 GET  /comment/list?id=<tid>                      → data.total + data.list（一级 + 楼中楼）
+GET  /thread/new/list?type=1                     → data.list（最新 10 条，不可翻页，「全部帖」页签补充用）
+GET  /thread/info?id=<tid>                       → 已降级为空 detail，仅作兜底
 ```
+
+**`/thread/hot` 的条目本身就是完整详情**（25 字段）：`content` 全文（实测 377 字符）、
+`img_paths`（相对路径数组）、`c_count`、`l_count`、`view_count`、`hot_val`、`hot_text`、
+`hot_rank`、`hot_rank_show`、`nickname`、`headimgurl`、`cate_name`、`post_time`。
+所以 `/thread/info` 挂掉也不影响热榜存档 —— 正文直接来自热榜响应。
 
 > **2026-11-01 重要变更：`/thread/v2/list` 已彻底失效。** 服务端固定返回
 > `{"errno":0,"errmsg":"","data":{"list":[]}}`（99 字节，永远空）。参数（`count` /
@@ -163,8 +180,8 @@ GET  /comment/list?id=<tid>                      → data.total + data.list（�
 >
 > | 接口 | 状态 |
 > |---|---|
-> | `/thread/new/list?type=1` | 可用：最新 10 条，33 字段（含 `content` 全文、`img_paths`、`is_anon`、`c_count`），**不能翻页** |
-> | `/thread/hot` | 可用：top 10，25 字段 |
+> | `/thread/hot` | **主源**。可用：top 10，25 字段，**自带 `content` 全文 + `img_paths` + 计数** |
+> | `/thread/new/list?type=1` | 可用：最新 10 条，33 字段（含 `content` 全文、`img_paths`、`is_anon`、`c_count`），**不能翻页**（「全部帖」页签用） |
 > | `/thread/toplist` | 可用：1 条 |
 > | `/comment/list?id=<tid>` | 可用：对已知 id 正常，条数与 `c_count` 一致 |
 > | `/thread/search` · `/thread/list` · `/thread/v2/list` · `/thread/info` | 降级为空 |
@@ -173,22 +190,25 @@ GET  /comment/list?id=<tid>                      → data.total + data.list（�
 > `/thread/new/list/v2`、`/thread/new/list2`、`/thread/new`。它们**都不支持
 > `end_time` / `from_id` 向更早翻页**，`from_id` 只能过滤出更新的那批。
 >
-> 后果：`new/list` 窗口只有 10 条，而实测新帖速率约 **1~3 条/20 秒**（每分钟 3~9 条），
-> 所以抓取间隔必须压到 1~2 分钟才不会滑出窗口 —— 这也是默认间隔从 30 分钟改成 2 分钟、
-> 下限从 15 分钟放宽到 1 分钟的原因。
+> **2026-11-01 三次降级之后的取舍修正（v4）**：一度把主源换成 `new/list` 并压到 2 分钟轮询，
+> 理由是「别把能拿到的都断了」。但 `hot` 条目自带全文，根本不需要 `info`，
+> 而热榜前 10 变化很慢（几分钟到几小时才动一次），**15 分钟一轮就够、不会漏**。
+> 所以 v4 把主源改回 `/thread/hot`，定时间隔回到 15 分钟（下限 5 分钟）；
+> `new/list` 降级为「全部帖」页签的补充源，榜外新帖漏掉是已知代价。
 
 ### 参数的真实边界（文档里写错的都在这里）
 
 | 项 | 实测结论 |
 |---|---|
-| `count` | 上限 **10**。`/thread/search` 与 `/thread/new/list` 的 count 都完全无效（`1/5/10/20/30/50/100/200` 一律 9~10 条） |
+| `count` | `/thread/hot` 上限 **10**，且**越界会静默回落 3 条**：`1/2/3`→3 条、`5`→5、`8`→8、`9`→9、`10`→10、**`11/12/15/20/50`→3 条**。`/thread/search` 与 `/thread/new/list` 的 count 则完全无效（`1/5/10/20/30/50/100/200` 一律 9~10 条） |
+| `hot_text` vs `hot_val` | **`hot_text` 是浏览量的紧凑写法**（`8.0K` ≈ `view_count` 7951），**不是热度**。真正的热度是 `hot_val`（`168`/`99`/`78`…）。UI 里必须分开标「热度 hot_val · 浏览 hot_text」，否则两个数字会撞在一起 |
 | `end_time` | 曾经是 `/thread/search` 唯一有效的翻页参数（返回 `p_time < end_time`，窗口约 47h：`-47h` 还有 9 条、`-48h` 起 `total=0`）。**2026-11-01 11:19 起该接口整体降级，`end_time` 彻底无效，`total` 恒 0** |
 | `from_id` | `/thread/new/list` 的唯一有效参数，语义是「id > from_id 的下限过滤」，**只能拿到更新的帖子，拿不到更旧的**（传末条 id 会回 9 条，传更小的 id 又跳回最新 10 条） |
 | 其余分页参数 | `page` / `offset` / `last_id` / `cursor` / `last_rank` / `from_time`（对 search）… 全部无效 |
 | `type` | **字段丰富度开关**。省略或 `=1` 只回 **8** 个字段；`0/2/3/4…` 回 **25** 个字段。**不影响排名**，只影响字段。`/thread/new/list` 则相反：**不带 `type` 返回空，带任意 type 值才返回 10 条** |
 | `sign` | `/comment/list` 的 `t_sign` **完全可省**，传 `"AAAA"` 也回一样的数据 |
 | `from` | `/thread/info` 的 `from` 参数无影响，只传 `id` 即可 |
-| GET vs POST | 掉出时间流的老帖用 **GET** `/thread/info` 仍全量可拉；用 POST 会 `errno 6` 签名校验失败 |
+| GET vs POST | POST 一律 `errno 6` 签名校验失败，全部接口都用 GET。（`/thread/info` 曾是唯一能拉老帖全量的接口，2026-11-01 已降级为空 detail） |
 
 ### header 必需性分级
 
@@ -254,14 +274,14 @@ token / alias 不参与签名。移植见 `src/com/zanao/hot/Sign.java`，11 条
 src/com/zanao/hot/
   Sign.java          makeSign 算法（零 Android 依赖，桌面 JVM 可直接跑）
   Api.java           四个接口 + 12 个 header + errno 翻译 + 图片下载 + 缩略图 URL
-  Db.java            8 张表 + 内容版本化 + 评论按 root 归并排序
-  Fetcher.java       一轮抓取：热榜名次 → new/list 单页 → 评论/图片 → 缩略化（回填与复查段已停用）
+  Db.java            10 张表 + 期快照 + 内容版本化 + 评论按 root 归并排序
+  Fetcher.java       一轮抓取：/thread/hot 存一期 → 在榜帖评论/图片 → 缩略化
   ImgCache.java      图片永久缓存（按内容 md5 命名、@!sm_w400、shrink/gcOrphans）
   Exporter.java      打包 zip 导出（SAF，无需存储权限）
-  AutoReceiver.java  AlarmManager 链式定时（下限 1 分钟，默认 2）
+  AutoReceiver.java  AlarmManager 链式定时（下限 5 分钟，默认 15）
   BootReceiver.java  开机重排定时
   App.java           全局崩溃捕获（写 files/crash.log）
-  MainActivity.java  时间流 / 统计 / 设置 / 导出
+  MainActivity.java  三页签（实时热榜 / 历史期数 / 全部帖）+ 统计 / 设置 / 导出
   ThreadActivity.java 帖子存档页（正文 + 旧版正文 + 名次轨迹 + 全量评论 + 已删原话）
 res/                图标 + strings
 test/               SignTest（签名 11 用例）、ApiLiveTest（真接口连通测试，桌面 JVM 跑）
@@ -269,7 +289,7 @@ docs/               设计文档 + 评审意见 + 模拟器实测截图
 dist/               已构建的 APK
 ```
 
-### 数据库（v3，8 张表）
+### 数据库（v4，10 张表）
 
 ```sql
 -- 帖子：thread_id 主键，一帖一行，正文被覆盖前先存快照
@@ -289,7 +309,15 @@ comments(comment_id PK, thread_id, uid, root_comment_id, reply_comment_id, is_la
 -- 评论原话留存：被删/被改时先把旧内容存进来，再覆盖 comments.content
 comment_content_snap(id, comment_id, thread_id, ts, content, is_deleted, raw_json)
 
--- 名次只在变化时记一行（v1 是每期固定写 10 行）
+-- 热榜期头：每轮一行，raw_json 存整期榜面（可完整还原"那一刻热榜长什么样"）
+hot_period(ts PK, in_list, raw_json, note)
+
+-- 期快照：每期每帖一行，哪怕名次没变也写
+rank_snapshot(id PK AUTOINCREMENT, ts, thread_id, rank, hot_val, hot_text,
+              view_count, c_count, l_count, title, raw_json)
+              -- idx_rs_ts(ts DESC) / idx_rs_tid(thread_id, ts DESC)
+
+-- 名次轨迹：只在名次变化时记一行（帖子详情页底部展示用）
 rank_event(id, ts, thread_id, rank, hot_val)
 
 -- 图片：url → 内容 md5（同一张图挂不同 URL 只存一份文件）
@@ -297,7 +325,7 @@ img_ref(url PK, content_md5, bytes, first_seen)
 
 fetch_log(id, ts, pages, new_threads, new_comments, changed_comments, img_ok, img_fail,
           oldest_posted_at, note)
-meta(key PK, value)   -- last_fetch_ts / backfill_cursor
+meta(key PK, value)   -- last_fetch_ts（backfill_cursor / refresh_cursor 是 v2 残留，只读不用）
 ```
 
 评论排序（楼中楼挂在一级下面）：
@@ -326,9 +354,9 @@ java "-Dfile.encoding=UTF-8" "-cp" "out\live;json.jar" ApiLiveTest "你的token"
 - **没在真手机上验过**。全部验证在 Android 14 x86_64 模拟器（WHPX 加速，720×1280）。
 - 国产 ROM 需要手动在「电池优化 / 自启动」里给「赞奥热榜」放行，否则后台 AlarmManager 会被杀。
 - 热榜只有前 10，拿不到 11+。这是接口硬限制，不是没做。
-- **抓不全**：`/thread/v2/list`、`/thread/search`、`/thread/list`、`/thread/info` 在 2026-11-01 先后被服务端降级成空列表 / 空 detail，只剩 `/thread/new/list?type=1`（最新 10 条、不可翻页）能拿新帖。窗口只有 10 条而新帖速率约每分钟 3~9 条，**间隔压到 1~2 分钟仍可能漏**，手机休眠 / 断网时段漏掉的帖子永久补不回来。
-- **老帖正文不再可更新**：`/thread/info` 降级后，已入库的帖子没法再拉一次详情，`has_detail=0` 的历史遗留帖（本机 5 条，2026-10-31 20:12~20:22 那批）永远补不上。
-- **不能补历史**：回填段 / 滚动复查段已删除，装完只能从现在开始往后攒。
+- **热榜之外的帖子抓不全**：`/thread/v2/list`、`/thread/search`、`/thread/list`、`/thread/info` 在 2026-11-01 先后被服务端降级成空列表 / 空 detail。「全部帖」页签里的新帖来自 `/thread/new/list?type=1`（最新 10 条、不可翻页），窗口只有 10 条而新帖速率约每分钟 3~9 条，所以**榜外的新帖会漏**。热榜本身不受影响（每轮 top 10 都能拿全）。
+- **老帖正文不再可更新**：`/thread/info` 降级后，已入库的非热榜帖没法再拉一次详情，`has_detail=0` 的历史遗留帖（本机 5 条，2026-10-31 20:12~20:22 那批）永远补不上。仍在榜的帖不受影响 —— 热榜响应自带全文。
+- **不能补历史**：v3 之前的 16 个伪期是从 `rank_event` 回灌的，只有 2~3 条（不是完整榜面），期数页已隐藏并注明。v4 起每轮都存完整 top 10。
 - 只支持 zzu 一个站（alias 写死）。换学校要改 `Api.ALIAS`。
 - token 会过期，过期后 errno 20，去设置页换。**粘贴时务必数一遍长度是 60**：多一个字符（比如 `...TThtmQ...` 就是 61）服务端同样只回 `errno 20 登录中...`，看起来跟"过期"一模一样。
 - 如果换过好几个正确的新包还一直报 errno 20，先看设置页输入框里到底是什么值 —— 2026-11-01 之前的版本会让 prefs 里的旧坏值永久压住 APK 内置值（修复见上面「token 取值优先级」）。

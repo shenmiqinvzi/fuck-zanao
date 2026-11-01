@@ -16,12 +16,10 @@ import android.os.SystemClock;
  * 而本项目零依赖手搓 APK。AlarmManager.setAndAllowWhileIdle 链式重排，
  * 精度更好且不受 Doze 影响。
  *
- * 2026-11-01：/thread/search、/thread/list、/thread/v2/list 三个时间流接口
- * 全部被服务端降级成空列表，只剩 /thread/new/list?type=1 可用，而它永远
- * 只返回最新 10 条、不可翻页。因此"抓取间隔"直接决定了漏帖率：
- * 实测新帖速率约 1~3 条/20 秒，也就是每分钟 3~9 条；而窗口只有 10 条，
- * 换句话说间隔超过 1~2 分钟就必然有帖子从窗口里滑出去、永久抓不到。
- * 默认间隔因此从 30 分钟下调到 2 分钟，下限也从 15 分钟放宽到 1 分钟。
+ * 2026-11-01 晚：抓取主源已改回 /thread/hot（热榜优先）。热榜 top 10 变化很慢
+ * （几分钟到几小时才动一次），不需要高频轮询，所以默认间隔回到 15 分钟、
+ * 下限 5 分钟。这一版之前为了追新帖流曾把间隔压到 2 分钟/最小 1 分钟，
+ * 现在没有那个必要了。
  */
 public class AutoReceiver extends BroadcastReceiver {
 
@@ -29,8 +27,8 @@ public class AutoReceiver extends BroadcastReceiver {
     static final String PREF = "zanao";
     static final String KEY_INTERVAL = "interval_min";
     static final String KEY_ENABLED = "auto_enabled";
-    static final int DEFAULT_INTERVAL = 2;
-    static final int MIN_INTERVAL = 1;
+    static final int DEFAULT_INTERVAL = 15;
+    static final int MIN_INTERVAL = 5;
 
     @Override
     public void onReceive(Context ctx, Intent intent) {

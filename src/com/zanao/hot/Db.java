@@ -34,7 +34,7 @@ import java.util.Locale;
 public class Db extends SQLiteOpenHelper {
 
     private static final String NAME = "zanao_hot.db";
-    private static final int VER = 3;
+    private static final int VER = 4;
 
     public Db(Context c) {
         super(c, NAME, null, VER);
@@ -138,6 +138,29 @@ public class Db extends SQLiteOpenHelper {
                 " l_count TEXT)");
         db.execSQL("CREATE INDEX IF NOT EXISTS idx_re ON rank_event(thread_id, ts DESC)");
 
+        // v4：热榜期头 —— 每抓一轮就是一期，raw_json 存整期榜面，可完整还原"某时刻热榜长什么样"
+        db.execSQL("CREATE TABLE IF NOT EXISTS hot_period (" +
+                " ts INTEGER PRIMARY KEY," +
+                " in_list INTEGER," +              // 本期在榜条数
+                " raw_json TEXT," +                // 整期 data 原样
+                " note TEXT)");
+
+        // v4：期快照 —— 每期每帖一行（哪怕名次没变也写），这是设计文档的核心表
+        db.execSQL("CREATE TABLE IF NOT EXISTS rank_snapshot (" +
+                " id INTEGER PRIMARY KEY AUTOINCREMENT," +
+                " ts INTEGER NOT NULL," +
+                " thread_id TEXT NOT NULL," +
+                " rank INTEGER," +
+                " hot_val TEXT," +
+                " hot_text TEXT," +
+                " view_count INTEGER," +
+                " c_count TEXT," +
+                " l_count TEXT," +
+                " title TEXT," +
+                " raw_json TEXT)");
+        db.execSQL("CREATE INDEX IF NOT EXISTS idx_rs_ts ON rank_snapshot(ts DESC)");
+        db.execSQL("CREATE INDEX IF NOT EXISTS idx_rs_tid ON rank_snapshot(thread_id, ts DESC)");
+
         // 图片：url → 内容 md5。文件按内容 md5 命名，同图只存一份
         db.execSQL("CREATE TABLE IF NOT EXISTS img_ref (" +
                 " url TEXT PRIMARY KEY," +
@@ -168,6 +191,59 @@ public class Db extends SQLiteOpenHelper {
         }
         if (o < 3) {
             migrateV2toV3(db);
+        }
+        if (o < 4) {
+            migrateV3toV4(db);
+        }
+    }
+
+    /**
+     * v3 → v4：恢复设计文档的核心 —— 每轮热榜都留一期快照。
+     *
+     * v2 那套「名次只在变化时记一行」是为了省空间，代价是「某时刻热榜长什么样」再也
+     * 还原不出来（掉榜帖旧名次残留、两个 rank=1 撞在一起）。v4 建 hot_period + rank_snapshot，
+     * 并把 rank_event 里已有的历史名次事件回灌成期快照，老数据不白扔。
+     */
+    private void migrateV3toV4(SQLiteDatabase db) {
+        createV2(db);   // 全部 IF NOT EXISTS，补建 hot_period / rank_snapshot
+
+        // 把 rank_event 的历史事件按 ts 聚成"伪期"，让历史页立刻有内容可看
+        Cursor c = db.rawQuery("SELECT DISTINCT ts FROM rank_event ORDER BY ts ASC", null);
+        java.util.ArrayList<Long> tss = new java.util.ArrayList<Long>();
+        try {
+            while (c.moveToNext()) tss.add(c.getLong(0));
+        } finally {
+            c.close();
+        }
+        for (Long tsObj : tss) {
+            long ts = tsObj.longValue();
+            int n = 0;
+            Cursor e = db.rawQuery(
+                    "SELECT thread_id, rank, hot_val, view_count, c_count, l_count" +
+                            " FROM rank_event WHERE ts=? ORDER BY rank ASC", new String[]{String.valueOf(ts)});
+            try {
+                while (e.moveToNext()) {
+                    ContentValues v = new ContentValues();
+                    v.put("ts", ts);
+                    v.put("thread_id", e.getString(0));
+                    v.put("rank", e.getInt(1));
+                    v.put("hot_val", e.getString(2));
+                    v.put("view_count", e.getInt(3));
+                    v.put("c_count", e.getString(4));
+                    v.put("l_count", e.getString(5));
+                    v.put("title", "");
+                    db.insert("rank_snapshot", null, v);
+                    n++;
+                }
+            } finally {
+                e.close();
+            }
+            ContentValues p = new ContentValues();
+            p.put("ts", ts);
+            p.put("in_list", n);
+            p.put("raw_json", "");
+            p.put("note", "从 rank_event 回灌");
+            db.insert("hot_period", null, p);
         }
     }
 
@@ -407,10 +483,39 @@ public class Db extends SQLiteOpenHelper {
      * 返回本期变化条数。
      */
     public int saveRankEvents(long ts, JSONArray hot) {
-        int changed = 0;
         SQLiteDatabase db = getWritableDatabase();
         db.beginTransaction();
         try {
+            int r = saveRankEventsLocked(db, ts, hot);
+            db.setTransactionSuccessful();
+            return r;
+        } finally {
+            db.endTransaction();
+        }
+    }
+
+    // ------------------------------------------------------------ 写入：热榜期快照
+
+    /**
+     * 落一期热榜：写期头 + 每帖一行快照（哪怕名次没变也写）。
+     * 同时更新 threads 的当前名次，并把整条 hot item 当详情写进 threads
+     * （hot 接口自带 content 全文 + img_paths + 计数，/thread/info 已死也无所谓）。
+     *
+     * 返回本期在榜条数。
+     */
+    public int saveHotPeriod(long ts, JSONArray hot, String note) {
+        int n = 0;
+        if (hot == null || hot.length() == 0) return 0;
+        SQLiteDatabase db = getWritableDatabase();
+        db.beginTransaction();
+        try {
+            ContentValues p = new ContentValues();
+            p.put("ts", ts);
+            p.put("in_list", hot.length());
+            p.put("raw_json", hot.toString());
+            p.put("note", note == null ? "" : note);
+            db.insertWithOnConflict("hot_period", null, p, SQLiteDatabase.CONFLICT_REPLACE);
+
             for (int i = 0; i < hot.length(); i++) {
                 JSONObject t = hot.optJSONObject(i);
                 if (t == null) continue;
@@ -418,38 +523,71 @@ public class Db extends SQLiteOpenHelper {
                 if (tid.length() == 0) continue;
                 int rank = t.optInt("hot_rank");
                 String hv = t.optString("hot_val");
+                String title = t.optString("title");
 
-                int prevRank = -1;
-                Cursor c = db.rawQuery(
-                        "SELECT rank FROM rank_event WHERE thread_id=? ORDER BY id DESC LIMIT 1",
-                        new String[]{tid});
-                try {
-                    if (c.moveToFirst()) prevRank = c.getInt(0);
-                } finally {
-                    c.close();
-                }
-                if (prevRank != rank) {
-                    ContentValues v = new ContentValues();
-                    v.put("ts", ts);
-                    v.put("thread_id", tid);
-                    v.put("rank", rank);
-                    v.put("hot_val", hv);
-                    v.put("view_count", t.optInt("view_count"));
-                    v.put("c_count", t.optString("c_count"));
-                    v.put("l_count", t.optString("l_count"));
-                    db.insert("rank_event", null, v);
-                    changed++;
-                }
-                // 帖子上顺带更新当前名次（列表角标用）
-                ContentValues tv = new ContentValues();
-                tv.put("hot_rank", rank);
-                tv.put("hot_val", hv);
-                tv.put("hot_seen_ts", ts);
-                db.update("threads", tv, "thread_id=?", new String[]{tid});
+                ContentValues v = new ContentValues();
+                v.put("ts", ts);
+                v.put("thread_id", tid);
+                v.put("rank", rank);
+                v.put("hot_val", hv);
+                v.put("hot_text", t.optString("hot_text"));
+                v.put("view_count", t.optInt("view_count"));
+                v.put("c_count", t.optString("c_count"));
+                v.put("l_count", t.optString("l_count"));
+                v.put("title", title);
+                v.put("raw_json", t.toString());
+                db.insert("rank_snapshot", null, v);
+                n++;
             }
+
+            // 名次变化事件仍然记（详情页的名次轨迹要用）
+            saveRankEventsLocked(db, ts, hot);
             db.setTransactionSuccessful();
+        } catch (Exception e) {
+            // 期快照失败不影响主流程
         } finally {
             db.endTransaction();
+        }
+        return n;
+    }
+
+    /** 与 saveRankEvents 相同，但复用外部事务 */
+    private int saveRankEventsLocked(SQLiteDatabase db, long ts, JSONArray hot) {
+        int changed = 0;
+        for (int i = 0; i < hot.length(); i++) {
+            JSONObject t = hot.optJSONObject(i);
+            if (t == null) continue;
+            String tid = t.optString("thread_id");
+            if (tid.length() == 0) continue;
+            int rank = t.optInt("hot_rank");
+            String hv = t.optString("hot_val");
+
+            int prevRank = -1;
+            Cursor c = db.rawQuery(
+                    "SELECT rank FROM rank_event WHERE thread_id=? ORDER BY id DESC LIMIT 1",
+                    new String[]{tid});
+            try {
+                if (c.moveToFirst()) prevRank = c.getInt(0);
+            } finally {
+                c.close();
+            }
+            if (prevRank != rank) {
+                ContentValues v = new ContentValues();
+                v.put("ts", ts);
+                v.put("thread_id", tid);
+                v.put("rank", rank);
+                v.put("hot_val", hv);
+                v.put("view_count", t.optInt("view_count"));
+                v.put("c_count", t.optString("c_count"));
+                v.put("l_count", t.optString("l_count"));
+                db.insert("rank_event", null, v);
+                changed++;
+            }
+            ContentValues tv = new ContentValues();
+            tv.put("hot_rank", rank);
+            tv.put("hot_val", hv);
+            tv.put("hot_seen_ts", ts);
+            db.update("threads", tv, "thread_id=?", new String[]{tid});
         }
         return changed;
     }
@@ -870,6 +1008,90 @@ public class Db extends SQLiteOpenHelper {
     public int countCommentHistory() {
         Cursor c = getReadableDatabase().rawQuery(
                 "SELECT COUNT(*) FROM comment_content_snap", null);
+        try {
+            if (c.moveToFirst()) return c.getInt(0);
+        } finally {
+            c.close();
+        }
+        return 0;
+    }
+
+    // ------------------------------------------------------------ 读取：热榜期
+
+    /** 最新一期热榜的榜面（rank 升序）。无期返回空游标 */
+    public Cursor latestHotBoard() {
+        long ts = latestPeriodTs();
+        return boardOf(ts);
+    }
+
+    /** 指定期 ts 的榜面（title 缺失时从 threads 表补，迁移回灌的老期没有 title） */
+    public Cursor boardOf(long ts) {
+        return getReadableDatabase().rawQuery(
+                "SELECT s.rank, s.thread_id, COALESCE(NULLIF(s.title,''), t.title)," +
+                        " s.hot_val, s.hot_text, s.view_count, s.c_count, s.l_count" +
+                        " FROM rank_snapshot s LEFT JOIN threads t ON t.thread_id = s.thread_id" +
+                        " WHERE s.ts=? ORDER BY s.rank ASC",
+                new String[]{String.valueOf(ts)});
+    }
+
+    /** 最新一期 ts；没有期返回 0 */
+    public long latestPeriodTs() {
+        Cursor c = getReadableDatabase().rawQuery(
+                "SELECT MAX(ts) FROM hot_period", null);
+        try {
+            if (c.moveToFirst() && !c.isNull(0)) return c.getLong(0);
+        } catch (Exception ignore) {
+        } finally {
+            c.close();
+        }
+        return 0;
+    }
+
+    /** 历史期数列表：ts 倒序。includeBackfill=false 时隐藏 v3 回灌的残缺伪期 */
+    public Cursor periods(boolean includeBackfill) {
+        String where = includeBackfill ? "" : " WHERE p.note NOT LIKE '%回灌%'";
+        return getReadableDatabase().rawQuery(
+                "SELECT p.ts, p.in_list, p.note, p.raw_json," +
+                        " (SELECT COUNT(*) FROM rank_snapshot s WHERE s.ts=p.ts) AS rows" +
+                        " FROM hot_period p" + where + " ORDER BY p.ts DESC", null);
+    }
+
+    /** 回灌伪期的条数（期数页底部提示用） */
+    public int countBackfillPeriods() {
+        Cursor c = getReadableDatabase().rawQuery(
+                "SELECT COUNT(*) FROM hot_period WHERE note LIKE '%回灌%'", null);
+        try {
+            if (c.moveToFirst()) return c.getInt(0);
+        } finally {
+            c.close();
+        }
+        return 0;
+    }
+
+    public int countPeriods() {
+        Cursor c = getReadableDatabase().rawQuery("SELECT COUNT(*) FROM hot_period", null);
+        try {
+            if (c.moveToFirst()) return c.getInt(0);
+        } finally {
+            c.close();
+        }
+        return 0;
+    }
+
+    public int countSnapshots() {
+        Cursor c = getReadableDatabase().rawQuery("SELECT COUNT(*) FROM rank_snapshot", null);
+        try {
+            if (c.moveToFirst()) return c.getInt(0);
+        } finally {
+            c.close();
+        }
+        return 0;
+    }
+
+    /** 某期有多少条名次变化事件（写进 fetch_log 的 note） */
+    public int countRankEventsAt(long ts) {
+        Cursor c = getReadableDatabase().rawQuery(
+                "SELECT COUNT(*) FROM rank_event WHERE ts=?", new String[]{String.valueOf(ts)});
         try {
             if (c.moveToFirst()) return c.getInt(0);
         } finally {
