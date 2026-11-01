@@ -45,7 +45,7 @@ v4 恢复期快照，并且**和存档不冲突**：
 
 ## 装哪个
 
-`dist/zanao_hot_1.0.apk`（379,192 字节）—— 自签名，装之前要允许「允许安装未知来源应用」。
+`dist/zanao_hot_1.0.apk`（375,096 字节，**不带 token 版**）—— 自签名，装之前要允许「允许安装未知来源应用」。
 
 - 包名 `com.zanao.hot`，versionCode 1 / versionName 1.0
 - minSdk 24（Android 7.0）/ targetSdk 34
