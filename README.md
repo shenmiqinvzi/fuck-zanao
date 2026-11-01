@@ -55,6 +55,19 @@ v4 恢复期快照，并且**和存档不冲突**：
 
 ---
 
+## 界面（v4 三页签）
+
+| 页签 | 截图 | 说明 |
+|---|---|---|
+| 实时热榜 | [`docs/screenshots/70_v4_hot.png`](docs/screenshots/70_v4_hot.png) | 最新一期榜面：rank 徽标、标题、热度 / 浏览 / 评论 / 赞 |
+| 历史期数 | [`docs/screenshots/71_v4_periods.png`](docs/screenshots/71_v4_periods.png) | 按时间倒序的期数列表，底部注明被隐藏的回灌伪期 |
+| 单期回看 | [`docs/screenshots/72_v4_period_detail.png`](docs/screenshots/72_v4_period_detail.png) | 点开某一期，看那一刻的完整榜面 |
+| 全部帖 | [`docs/screenshots/73_v4_all.png`](docs/screenshots/73_v4_all.png) | 时间流，按发帖时间倒序，带「榜N」角标 |
+| 帖子存档 | [`docs/screenshots/74_v4_detail.png`](docs/screenshots/74_v4_detail.png) | 正文 + 作者 + 浏览/赞/收藏/评论 + 名次轨迹 |
+| 设置 | [`docs/screenshots/75_v4_settings.png`](docs/screenshots/75_v4_settings.png) | token（60 字符校验）、抓取间隔（默认 15 / 最小 5） |
+
+---
+
 ## token
 
 赞奥的接口靠 `X-Sc-Token` 认人，token 跟账号绑。本仓库**不附带任何可用 token**——`res/values/strings.xml` 里的 `default_token` 是空的。
