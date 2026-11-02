@@ -108,12 +108,13 @@ Step 'aapt2 link' {
         --java "$out\gen" --auto-add-overlay
 }
 
-# 3) 编译 Java
+# 3) 编译 Java（2>$null：javac 把"已过时 API"提示写到 stderr，PowerShell 5.1 会当错误中断，实际编译是成功的）
 Step 'javac' {
     $src = @(Get-ChildItem "$proj\src" -Recurse -Filter *.java | ForEach-Object { $_.FullName })
     $src += "$out\gen\com\zanao\hot\R.java"
     & "$jdk\bin\javac.exe" -encoding UTF-8 -Xlint:-options -source 8 -target 8 `
-        -bootclasspath $plat -d "$out\cls" $src
+        -bootclasspath $plat -d "$out\cls" $src 2>$null
+    if (-not (Test-Path "$out\cls\com\zanao\hot\MainActivity.class")) { throw "javac 实际失败：无 class 产物" }
 }
 
 # 4) dex

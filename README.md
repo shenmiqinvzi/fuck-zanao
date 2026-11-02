@@ -45,9 +45,9 @@ v4 恢复期快照，并且**和存档不冲突**：
 
 ## 装哪个
 
-`dist/zanao_hot_1.0.apk`（379,192 字节，**不带 token 版**）—— 自签名，装之前要允许「安装未知来源应用」。
+`dist/zanao_hot_1.1.apk`（379,189 字节，**不带 token 版**）—— 自签名，装之前要允许「安装未知来源应用」。
 
-- 包名 `com.zanao.hot`，versionCode 1 / versionName 1.0
+- 包名 `com.zanao.hot`，versionCode 2 / versionName 1.1（保活版）
 - minSdk 24（Android 7.0）/ targetSdk 34
 - 已在 **Android 14 x86_64 模拟器**上跑通全链路（热榜 10 条存成一期 · 1029 帖 / 2977 评论 / 540 图 · 三个页签 · 详情页 · 离线 · 定时 · 导出）
 

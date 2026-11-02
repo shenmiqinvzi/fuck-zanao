@@ -8,9 +8,12 @@ import android.content.Intent;
 import android.content.SharedPreferences;
 import android.database.Cursor;
 import android.graphics.Color;
+import android.net.Uri;
 import android.os.Bundle;
 import android.os.Handler;
 import android.os.Looper;
+import android.os.PowerManager;
+import android.provider.Settings;
 import android.text.InputType;
 import android.view.View;
 import android.view.ViewGroup;
@@ -74,6 +77,48 @@ public class MainActivity extends Activity {
         reload();
         if (getSharedPreferences(PREF, MODE_PRIVATE).getBoolean(AutoReceiver.KEY_ENABLED, true)) {
             AutoReceiver.schedule(this, AutoReceiver.intervalMin(this));
+            // v5：启动前台保活服务（ROM 杀后台的对策）
+            KeepAliveService.ensure(this);
+            // v5：没进电池白名单就弹一次引导（每次打开 App 最多提醒一次）
+            maybeBatteryGuide();
+        }
+    }
+
+    /** 电池优化白名单引导：不在白名单里时弹提示，点「去设置」跳系统授权框 */
+    private void maybeBatteryGuide() {
+        try {
+            PowerManager pm = (PowerManager) getSystemService(Context.POWER_SERVICE);
+            String pkg = getPackageName();
+            if (pm == null || pm.isIgnoringBatteryOptimizations(pkg)) return;
+            SharedPreferences sp = getSharedPreferences(PREF, MODE_PRIVATE);
+            long now = System.currentTimeMillis();
+            if (now - sp.getLong("battery_guide_at", 0L) < 6L * 60L * 60L * 1000L) return;
+            sp.edit().putLong("battery_guide_at", now).apply();
+            new AlertDialog.Builder(this)
+                    .setTitle("开启定时抓取需要两步")
+                    .setMessage("手机厂商会清理后台应用，导致定时抓取失效。\n\n"
+                            + "第 1 步：点「去授权」→ 选择「允许，不询问」"
+                            + "（本应用只在后台抓取热榜，不耗电）。\n"
+                            + "第 2 步：在系统设置里允许本应用「自启动」和「后台运行」"
+                            + "（小米：神隐模式/省电策略→无限制；华为：启动管理→手动管理全开）。")
+                    .setPositiveButton("去授权", new DialogInterface.OnClickListener() {
+                        public void onClick(DialogInterface d, int w) {
+                            try {
+                                @SuppressWarnings("InlinedApi")
+                                Intent i = new Intent(Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS,
+                                        Uri.parse("package:" + getPackageName()));
+                                startActivity(i);
+                            } catch (Throwable t) {
+                                try {
+                                    startActivity(new Intent(Settings.ACTION_IGNORE_BATTERY_OPTIMIZATION_SETTINGS));
+                                } catch (Throwable ignore2) {
+                                }
+                            }
+                        }
+                    })
+                    .setNegativeButton("暂不", null)
+                    .show();
+        } catch (Throwable ignore) {
         }
     }
 
@@ -793,6 +838,8 @@ public class MainActivity extends Activity {
                         sp.edit().putInt(AutoReceiver.KEY_INTERVAL, m)
                                 .putBoolean(AutoReceiver.KEY_ENABLED, true).apply();
                         AutoReceiver.schedule(MainActivity.this, m);
+                        // v5：保存后顺手拉起前台服务并刷新通知上的间隔
+                        KeepAliveService.ensure(MainActivity.this);
                         Toast.makeText(MainActivity.this, "已保存，每 " + m + " 分钟抓一轮",
                                 Toast.LENGTH_SHORT).show();
                     }
@@ -804,6 +851,55 @@ public class MainActivity extends Activity {
                         Toast.makeText(MainActivity.this, "已关闭自动抓取", Toast.LENGTH_SHORT).show();
                     }
                 })
+                .setNeutralButton("保活设置", new DialogInterface.OnClickListener() {
+                    public void onClick(DialogInterface d, int w) {
+                        showKeepAliveDialog();
+                    }
+                })
+                .show();
+    }
+
+    /** v5：保活设置引导（电池白名单 + 自启动 + 常驻通知状态一览） */
+    private void showKeepAliveDialog() {
+        StringBuilder sb = new StringBuilder();
+        PowerManager pm = (PowerManager) getSystemService(Context.POWER_SERVICE);
+        boolean white = pm != null && pm.isIgnoringBatteryOptimizations(getPackageName());
+        sb.append("① 电池优化白名单：").append(white ? "✓ 已允许" : "✗ 未允许（定时抓取可能被系统杀掉）")
+          .append("\n② 前台保活服务：").append(KeepAliveService.sRunning ? "✓ 运行中" : "✗ 未运行（重新打开本应用可恢复）")
+          .append("\n③ 自启动权限：请在系统设置里手动开启（各品牌入口不同）\n\n")
+          .append("小米：设置→应用设置→赞奥热榜→省电策略→无限制 + 允许自启动\n")
+          .append("华为/荣耀：设置→应用→赞奥热榜→耗电管理→手动管理（三开关全开）\n")
+          .append("OPPO/一加：设置→电池→更多→赞奥热榜→允许后台运行 + 自启动\n")
+          .append("vivo：设置→电池→后台耗电管理→赞奥热榜→允许后台高耗电\n")
+          .append("三星：设置→电池→后台使用限制→把赞奥热榜移出休眠应用\n")
+          .append("原生/模拟器：无需额外设置");
+
+        new AlertDialog.Builder(this)
+                .setTitle("保活设置")
+                .setMessage(sb.toString())
+                .setPositiveButton(white ? "查看自启动设置" : "去授权电池白名单", new DialogInterface.OnClickListener() {
+                    public void onClick(DialogInterface d, int w) {
+                        try {
+                            PowerManager pm2 = (PowerManager) getSystemService(Context.POWER_SERVICE);
+                            if (pm2 != null && pm2.isIgnoringBatteryOptimizations(getPackageName())) {
+                                // 已在白名单：跳应用详情页（各品牌自启动入口都在里面）
+                                startActivity(new Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS,
+                                        Uri.parse("package:" + getPackageName())));
+                            } else {
+                                @SuppressWarnings("InlinedApi")
+                                Intent i = new Intent(Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS,
+                                        Uri.parse("package:" + getPackageName()));
+                                startActivity(i);
+                            }
+                        } catch (Throwable t) {
+                            try {
+                                startActivity(new Intent(Settings.ACTION_IGNORE_BATTERY_OPTIMIZATION_SETTINGS));
+                            } catch (Throwable ignore2) {
+                            }
+                        }
+                    }
+                })
+                .setNegativeButton("关闭", null)
                 .show();
     }
 
