@@ -387,32 +387,50 @@ public class ThreadActivity extends Activity {
     }
 
     private void loadInto(final ImageView iv, final String url) {
-        if (ImgCache.has(this, url)) {
-            byte[] b = ImgCache.readAll(ImgCache.fileOf(this, url));
-            if (b != null) {
-                Bitmap bmp = BitmapFactory.decodeByteArray(b, 0, b.length);
-                if (bmp != null) {
-                    iv.setImageBitmap(bmp);
-                    return;
-                }
-            }
-        }
+        final int reqW = iv.getLayoutParams() == null
+                ? 660 : Math.max(1, ((LinearLayout.LayoutParams) iv.getLayoutParams()).width);
+        // 统一丢后台线程：磁盘 IO + decode 都不轻，主线程只收成品。
+        // （旧版缓存命中时在主线程 decodeByteArray，多图帖会卡 UI 甚至 OOM 闪退——真机「点帖子闪退」的头号嫌疑。）
         pool.execute(new Runnable() {
             public void run() {
-                try {
-                    final byte[] bytes = Api.download(url);
-                    if (bytes == null || bytes.length == 0) return;
-                    ImgCache.fetch(ThreadActivity.this, url);
-                    final Bitmap bmp = BitmapFactory.decodeByteArray(bytes, 0, bytes.length);
-                    if (bmp == null) return;
-                    ui.post(new Runnable() {
-                        public void run() { iv.setImageBitmap(bmp); }
-                    });
-                } catch (Exception e) {
-                    // 图片失败不影响正文
+                Bitmap bmp = null;
+                if (ImgCache.has(ThreadActivity.this, url)) {
+                    byte[] b = ImgCache.readAll(ImgCache.fileOf(ThreadActivity.this, url));
+                    if (b != null) bmp = decodeScaled(b, reqW);
                 }
+                if (bmp == null) {
+                    try {
+                        byte[] bytes = Api.download(url);
+                        if (bytes == null || bytes.length == 0) return;
+                        ImgCache.fetch(ThreadActivity.this, url);
+                        bmp = decodeScaled(bytes, reqW);
+                    } catch (Exception e) {
+                        return; // 图片失败不影响正文
+                    }
+                }
+                if (bmp == null) return;
+                final Bitmap out = bmp;
+                ui.post(new Runnable() {
+                    public void run() { iv.setImageBitmap(out); }
+                });
             }
         });
+    }
+
+    /** 下采样 decode：只解到显示宽度就够，原图一张能吃 30MB 内存，多图帖必 OOM */
+    private static Bitmap decodeScaled(byte[] bytes, int reqW) {
+        try {
+            BitmapFactory.Options o = new BitmapFactory.Options();
+            o.inJustDecodeBounds = true;
+            BitmapFactory.decodeByteArray(bytes, 0, bytes.length, o);
+            int sample = 1;
+            while (o.outWidth / (sample * 2) >= reqW) sample *= 2;
+            BitmapFactory.Options o2 = new BitmapFactory.Options();
+            o2.inSampleSize = sample;
+            return BitmapFactory.decodeByteArray(bytes, 0, bytes.length, o2);
+        } catch (Throwable t) {
+            return null;
+        }
     }
 
     @Override

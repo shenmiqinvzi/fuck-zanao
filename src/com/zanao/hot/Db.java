@@ -1124,26 +1124,24 @@ public class Db extends SQLiteOpenHelper {
         return 0;
     }
 
-    /** 首页：按发布时间倒序。beforePostedAt=0 表示第一页 */
+    /** 首页：按发布时间倒序，只显示上过热榜的帖子（hot_rank>0 或 last_in_list_ts>0）。
+     *  beforePostedAt=0 表示第一页。老库升级上来的从未上榜帖不在这里出现。 */
     public Cursor feedThreads(long beforePostedAt, int limit) {
+        String cols = "SELECT thread_id, posted_at, title, cate_name, c_count, l_count," +
+                " view_count, hot_rank, content, nickname, has_detail FROM threads";
         if (beforePostedAt <= 0) {
             return getReadableDatabase().rawQuery(
-                    "SELECT thread_id, posted_at, title, cate_name, c_count, l_count," +
-                            " view_count, hot_rank, content, nickname, has_detail" +
-                            " FROM threads ORDER BY posted_at DESC, thread_id DESC LIMIT ?",
+                    cols + " WHERE (hot_rank > 0 OR last_in_list_ts > 0)" +
+                            " ORDER BY posted_at DESC, thread_id DESC LIMIT ?",
                     new String[]{String.valueOf(limit)});
         }
         return getReadableDatabase().rawQuery(
-                "SELECT thread_id, posted_at, title, cate_name, c_count, l_count," +
-                        " view_count, hot_rank, content, nickname, has_detail" +
-                        " FROM threads WHERE posted_at < ? " +
-                        "ORDER BY posted_at DESC, thread_id DESC LIMIT ?",
+                cols + " WHERE posted_at < ? AND (hot_rank > 0 OR last_in_list_ts > 0)" +
+                        " ORDER BY posted_at DESC, thread_id DESC LIMIT ?",
                 new String[]{String.valueOf(beforePostedAt), String.valueOf(limit)});
     }
-
     /**
      * 搜索：标题 LIKE / 正文 LIKE，标题命中排前，同级按时间倒序。
-     * q 里的 % _ \ 会被转义，用户输入当纯文本处理。返回 feedThreads 同列序的游标。
      */
     public Cursor searchThreads(String q, int limit) {
         String like = "%" + q.replace("\\", "\\\\").replace("%", "\\%")
@@ -1152,7 +1150,9 @@ public class Db extends SQLiteOpenHelper {
                 "SELECT thread_id, posted_at, title, cate_name, c_count, l_count," +
                         " view_count, hot_rank, content, nickname, has_detail" +
                         " FROM threads" +
-                        " WHERE title LIKE ? ESCAPE '\\' OR content LIKE ? ESCAPE '\\'" +
+                        " WHERE (hot_rank > 0 OR last_in_list_ts > 0)" +
+                        " AND (title LIKE ? ESCAPE '\\' OR content LIKE ? ESCAPE '\\'" +
+                        " ) " +
                         " ORDER BY (CASE WHEN title LIKE ? ESCAPE '\\' THEN 0 ELSE 1 END)," +
                         " posted_at DESC, thread_id DESC LIMIT ?",
                 new String[]{like, like, like, String.valueOf(limit)});
@@ -1164,7 +1164,8 @@ public class Db extends SQLiteOpenHelper {
                 .replace("_", "\\_") + "%";
         Cursor c = getReadableDatabase().rawQuery(
                 "SELECT COUNT(*) FROM threads" +
-                        " WHERE title LIKE ? ESCAPE '\\' OR content LIKE ? ESCAPE '\\'",
+                        " WHERE (hot_rank > 0 OR last_in_list_ts > 0)" +
+                        " AND (title LIKE ? ESCAPE '\\' OR content LIKE ? ESCAPE '\\')",
                 new String[]{like, like});
         try {
             if (c.moveToFirst()) return c.getInt(0);

@@ -44,22 +44,22 @@ v1.3 的取舍：
 ---
 
 ## 装哪个
-
+`dist/zanao_hot_1.3.1.apk`（383,281 字节，**不带 token 版**）—— 自签名，装之前要允许「安装未知来源应用」。
 `dist/zanao_hot_1.2.apk`（383,286 字节，**不带 token 版**）—— 自签名，装之前要允许「安装未知来源应用」。
-
+- 包名 `com.zanao.hot`，versionCode 5 / versionName 1.3.1（无期化 + 掉榜追踪 + 闪退修复 + 全部帖只显示上过榜的帖子）
 - 包名 `com.zanao.hot`，versionCode 3 / versionName 1.2（保活 + 搜索）
-- minSdk 24（Android 7.0）/ targetSdk 34
+- 已在 **Android 14 x86_64 模拟器**上跑通全链路（实时热榜 · 掉榜追踪 · 1053 帖 / 4914 评论 / 1030 图 · 三个页签 · 详情页 · 离线 · 定时 · 导出）
 - 已在 **Android 14 x86_64 模拟器**上跑通全链路（热榜 10 条存成一期 · 1029 帖 / 2977 评论 / 540 图 · 三个页签 · 详情页 · 离线 · 定时 · 导出）
 
 **注意**：仓库里的 APK 是**不带 token** 的版本（见下面「token」一节），装上后要在设置页填自己的 token 才能抓。
 
----
+## 界面（v1.3 三页签）
 ## 界面（v1.3 三页签）
 
 | 页签 | 截图 | 说明 |
 |---|---|---|
 | 实时热榜 | [`docs/screenshots/70_v4_hot.png`](docs/screenshots/70_v4_hot.png) | 最新一轮在榜：rank 徽标、标题、热度 / 浏览 / 评论 / 赞（历史期数页签已随 v1.3 去分期移除） |
-| 全部帖 | [`docs/screenshots/73_v4_all.png`](docs/screenshots/73_v4_all.png) | 时间流，按发帖时间倒序，带「榜N」角标 |
+| 全部帖 | [`docs/screenshots/73_v4_all.png`](docs/screenshots/73_v4_all.png) | 时间流，按发帖时间倒序，只显示上过热榜的帖子（v1.3.1 过滤掉从未上榜的历史帖） |
 | 帖子存档 | [`docs/screenshots/74_v4_detail.png`](docs/screenshots/74_v4_detail.png) | 正文 + 作者 + 浏览/赞/收藏/评论 + 名次轨迹 |
 | 设置 | [`docs/screenshots/75_v4_settings.png`](docs/screenshots/75_v4_settings.png) | token（60 字符校验）、抓取间隔（默认 15 / 最小 5） |
 
@@ -359,7 +359,7 @@ java "-Dfile.encoding=UTF-8" "-cp" "out\live;json.jar" ApiLiveTest "你的token"
 
 ## 已知限制
 
-- **没在真手机上验过**。全部验证在 Android 14 x86_64 模拟器（WHPX 加速，720×1280）。
+- **没在真手机上验过**。全部验证在 Android 14 x86_64 模拟器（WHPX 加速，720×1280）。v1.3.1 修了真机「点帖子闪退」：详情页图片改为后台线程解码 + 按显示宽度下采样（旧版在主线程解码原图，多图帖会 OOM）；若升级后仍闪退，开「统计」对话框把崩溃记录发给作者。
 - 国产 ROM 需要手动在「电池优化 / 自启动」里给「赞奥热榜」放行，否则后台 AlarmManager 会被杀。
 - 热榜只有前 10，拿不到 11+。这是接口硬限制，不是没做。
 - **热榜之外的帖子抓不全**：`/thread/v2/list`、`/thread/search`、`/thread/list`、`/thread/info` 在 2026-11-01 先后被服务端降级成空列表 / 空 detail。「全部帖」页签里的新帖来自 `/thread/new/list?type=1`（最新 10 条、不可翻页），窗口只有 10 条而新帖速率约每分钟 3~9 条，所以**榜外的新帖会漏**。热榜本身不受影响（每轮 top 10 都能拿全）。

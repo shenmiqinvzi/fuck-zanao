@@ -39,7 +39,7 @@ import java.util.concurrent.Executors;
  *  - 实时热榜：threads 里 hot_seen_ts=最新轮 的在榜帖（rank 1~10 + 标题 + 热度 + 浏览/评论），
  *    榜面照看；名次轨迹/热度曲线继续存在 rank_event 里，详情页不丢
  *  - 历史期数：删掉（hot_period / rank_snapshot 已停写并清空）
- *  - 全部帖：时间流（附带热榜角标），用来翻老帖
+ *  - 全部帖：时间流（只显示上过热榜的帖子）
  *  - 搜索：本地 SQLite 标题/正文 LIKE，标题命中排前，正文命中给摘录行
  *  - 掉榜追踪：上过榜、掉榜未满 24h 的帖子每轮补抓评论，统计页显示「追踪中 N 帖」
  */
@@ -404,20 +404,6 @@ public class MainActivity extends Activity {
                 LinearLayout headLine = new LinearLayout(this);
                 headLine.setOrientation(LinearLayout.HORIZONTAL);
 
-                if (rank > 0) {
-                    TextView badge = new TextView(this);
-                    badge.setText("榜" + rank);
-                    badge.setTextSize(11);
-                    badge.setTextColor(Color.WHITE);
-                    badge.setBackgroundColor(0xFFFF6B4A);
-                    badge.setPadding(dp(5), dp(1), dp(5), dp(1));
-                    LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(
-                            ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT);
-                    lp.rightMargin = dp(6);
-                    lp.topMargin = dp(2);
-                    headLine.addView(badge, lp);
-                }
-
                 TextView head = new TextView(this);
                 String shown = t;
                 if (shown == null || shown.length() == 0) {
@@ -623,20 +609,6 @@ public class MainActivity extends Activity {
                 LinearLayout headLine = new LinearLayout(this);
                 headLine.setOrientation(LinearLayout.HORIZONTAL);
 
-                if (rank > 0) {
-                    TextView badge = new TextView(this);
-                    badge.setText("榜" + rank);
-                    badge.setTextSize(11);
-                    badge.setTextColor(Color.WHITE);
-                    badge.setBackgroundColor(0xFFFF6B4A);
-                    badge.setPadding(dp(5), dp(1), dp(5), dp(1));
-                    LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(
-                            ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT);
-                    lp.rightMargin = dp(6);
-                    lp.topMargin = dp(2);
-                    headLine.addView(badge, lp);
-                }
-
                 TextView head = new TextView(this);
                 String shown = t;
                 if (shown == null || shown.length() == 0) {
@@ -805,6 +777,16 @@ public class MainActivity extends Activity {
         sb.append("图片 ").append(imgRefs).append(" 个 URL → ")
                 .append(ImgCache.size(this) / 1024).append(" KB 本地文件\n");
         sb.append("图片按内容去重，同一张图只存一份\n");
+
+        // 崩溃自记录：App 里有全局 UncaughtExceptionHandler，崩过就会有内容。
+        // 显示出来方便用户反馈「点了某个帖子闪退」这类问题。
+        String crashLog = App.read(this);
+        if (crashLog != null && crashLog.length() > 0) {
+            sb.append("\n⚠️ 检测到 ").append(crashLog.split("=== ").length - 1)
+                    .append(" 次崩溃记录（下面是最近一次）：\n");
+            String last = crashLog.substring(crashLog.lastIndexOf("=== "));
+            sb.append(last.length() > 900 ? last.substring(0, 900) + "\n…" : last);
+        }
 
         long lastTs = db.metaLong("last_fetch_ts", 0);
         if (lastTs > 0) {
