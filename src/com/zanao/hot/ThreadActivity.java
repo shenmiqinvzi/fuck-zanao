@@ -387,8 +387,12 @@ public class ThreadActivity extends Activity {
     }
 
     private void loadInto(final ImageView iv, final String url) {
-        final int reqW = iv.getLayoutParams() == null
-                ? 660 : Math.max(1, ((LinearLayout.LayoutParams) iv.getLayoutParams()).width);
+        // 目标宽度：布局宽度 <= 0（MATCH_PARENT=-1 / WRAP_CONTENT=-2）时用屏幕宽兜底。
+        // （v1.3.1 首版这里直接拿 LayoutParams.width，MATCH_PARENT 是 -1，Math.max(1,-1)=1，
+        //   inSampleSize 一路翻倍把 2000px 图解成 1~2 像素——图片全糊成色块，就是这版「图片出问题」的真凶。）
+        int lpW = iv.getLayoutParams() == null ? -1 : ((LinearLayout.LayoutParams) iv.getLayoutParams()).width;
+        final int reqW = lpW > 0 ? lpW
+                : Math.max(300, getResources().getDisplayMetrics().widthPixels - dp(28));
         // 统一丢后台线程：磁盘 IO + decode 都不轻，主线程只收成品。
         // （旧版缓存命中时在主线程 decodeByteArray，多图帖会卡 UI 甚至 OOM 闪退——真机「点帖子闪退」的头号嫌疑。）
         pool.execute(new Runnable() {
