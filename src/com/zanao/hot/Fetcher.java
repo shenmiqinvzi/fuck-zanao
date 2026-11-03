@@ -6,16 +6,20 @@ import org.json.JSONArray;
 import org.json.JSONObject;
 
 /**
- * 抓取流水线 v4 —— 热榜优先（回到设计文档的定位）。
+ * 抓取流水线 v5 —— 热榜优先 + 掉榜 24h 追踪。
  *
  * 一轮的动作：
  *
  *  1) 拉 /thread/hot（top 10）。热榜条目自带 content 全文、img_paths、c_count、l_count、
  *     view_count、hot_text、hot_rank —— 本身就是完整详情，不需要再打 /thread/info
  *     （那个接口 2026-11-01 起已降级成 detail:[]）。
- *  2) 落一期快照：hot_period 写期头（ts + 整期 raw_json，可还原"某时刻榜面"），
- *     rank_snapshot 每帖一行（哪怕名次没变也写）—— 这是设计文档的核心表。
+ *  2) 记名次：rank_event 只在名次变化时写一行（详情页名次轨迹用）；
+ *     在榜帖回写 threads.hot_rank/hot_seen_ts/last_in_list_ts。
+ *     v4 的期头 hot_period 与每帖一行 rank_snapshot 已停写（v5 迁移时清空）。
  *  3) 在榜帖：正文落 threads、评论全量重拉、帖图与评论图下载（缩略化）。
+ *  4) v5 新增：掉榜追踪——上过榜、掉榜未满 24h、本轮不在榜的帖子，
+ *     掉榜最老的优先补 5 个，逐个拉评论+更新计数。回榜自动并回主流程，
+ *     24h 没回就停止追踪，数据停在最后状态。
  *
  * 实测约束（2026-11-01 复核）：
  *  - /thread/hot?count=10 稳定回 10 条；count 超过 10 会回落 3 条，所以固定 count=10
@@ -68,19 +72,17 @@ public final class Fetcher {
         int newComments = 0;
         int changedComments = 0;
         int rankChanged = 0;
-        int inList = 0;
         long oldest = 0;
         try {
             long ts = System.currentTimeMillis();
 
             // ---------- 1) 热榜：唯一主源 ----------
             JSONArray hot = hotWithRetry(api);
-            inList = hot.length();
-            if (inList == 0) {
+            if (hot.length() == 0) {
                 throw new Exception("热榜返回空列表（接口可能又变了）");
             }
 
-            // ---------- 2) 期快照：期头 + 每帖一行 ----------
+            // ---------- 2) 名次事件 + 在榜回写 ----------
             db.saveHotPeriod(ts, hot, deep ? "定时" : "手动");
             rankChanged = db.countRankEventsAt(ts);
 
@@ -105,16 +107,41 @@ public final class Fetcher {
             imgOk += r[2];
             imgFail += r[3];
 
-            // ---------- 4) 收尾 ----------
+            // ---------- 4) 掉榜追踪（v5）：补抓掉榜未满 24h 的帖子 ----------
+            java.util.Set<String> inList = new java.util.HashSet<String>();
+            for (int i = 0; i < hot.length(); i++) {
+                JSONObject t = hot.optJSONObject(i);
+                if (t != null) inList.add(t.optString("thread_id"));
+            }
+            java.util.List<String> track = db.trackCandidates(System.currentTimeMillis(), inList);
+            int tracked = 0;
+            for (String tid : track) {
+                try {
+                    // 评论照常重拉（新评论插入、被删留旧版，全走现有逻辑）
+                    JSONObject cs = api.comments(tid);
+                    Db.CommentResult cr = db.saveComments(tid, cs, ts);
+                    newComments += cr.added;
+                    changedComments += cr.changed;
+                    int[] imgs = fetchCommentImages(ctx, cs);
+                    imgOk += imgs[0];
+                    imgFail += imgs[1];
+                    tracked++;
+                } catch (Exception ignore) {
+                }
+            }
+
+            // ---------- 5) 收尾 ----------
             long[] shrunk = ImgCache.shrink(ctx, 60L * 1000);
             String period = Db.periodOf(ts);
             db.logFetch(ts, 1, newThreads, newComments, changedComments,
                     imgOk, imgFail, oldest,
-                    "inList=" + inList + " rankChanged=" + rankChanged
+                    "inList=" + inList.size() + " rankChanged=" + rankChanged
+                            + " tracked=" + tracked
                             + " shrink=" + shrunk[0]);
             db.setLastResult(ctx, ts, period, imgOk, imgFail);
-            return "热榜 " + inList + " 条 · 新帖 " + newThreads + " · 新评论 " + newComments
+            return "热榜 " + inList.size() + " 条 · 新帖 " + newThreads + " · 新评论 " + newComments
                     + " · 改动评论 " + changedComments + " · 名次变化 " + rankChanged
+                    + " · 追踪 " + tracked + " 帖"
                     + " · 图 " + imgOk + "/" + (imgOk + imgFail)
                     + " · 缩略化 " + shrunk[0] + " 张省 " + (shrunk[1] / 1024) + " KB";
         } finally {

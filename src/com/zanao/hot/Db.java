@@ -14,6 +14,7 @@ import java.text.SimpleDateFormat;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Locale;
+import java.util.Set;
 
 /**
  * 本地存档库 v2 —— "只存一份 + 版本化" 模型
@@ -34,7 +35,7 @@ import java.util.Locale;
 public class Db extends SQLiteOpenHelper {
 
     private static final String NAME = "zanao_hot.db";
-    private static final int VER = 4;
+    private static final int VER = 5;
 
     public Db(Context c) {
         super(c, NAME, null, VER);
@@ -77,7 +78,8 @@ public class Db extends SQLiteOpenHelper {
                 " comment_total INTEGER," +
                 " hot_rank INTEGER," +             // 当前/最近名次
                 " hot_val TEXT," +
-                " hot_seen_ts INTEGER)");
+                " hot_seen_ts INTEGER," +
+                " last_in_list_ts INTEGER DEFAULT 0)");  // 最近一次仍在热榜上的时间（掉榜追踪用）
         db.execSQL("CREATE INDEX IF NOT EXISTS idx_t_posted ON threads(posted_at DESC)");
 
         // 正文历史版本：只在 content 变化时写一行（实测变化率 ~0）
@@ -138,14 +140,14 @@ public class Db extends SQLiteOpenHelper {
                 " l_count TEXT)");
         db.execSQL("CREATE INDEX IF NOT EXISTS idx_re ON rank_event(thread_id, ts DESC)");
 
-        // v4：热榜期头 —— 每抓一轮就是一期，raw_json 存整期榜面，可完整还原"某时刻热榜长什么样"
+        // v4（已废弃写入，表保留）：热榜期头
         db.execSQL("CREATE TABLE IF NOT EXISTS hot_period (" +
                 " ts INTEGER PRIMARY KEY," +
                 " in_list INTEGER," +              // 本期在榜条数
                 " raw_json TEXT," +                // 整期 data 原样
                 " note TEXT)");
 
-        // v4：期快照 —— 每期每帖一行（哪怕名次没变也写），这是设计文档的核心表
+        // v4（已废弃写入，表保留）：期快照
         db.execSQL("CREATE TABLE IF NOT EXISTS rank_snapshot (" +
                 " id INTEGER PRIMARY KEY AUTOINCREMENT," +
                 " ts INTEGER NOT NULL," +
@@ -194,6 +196,9 @@ public class Db extends SQLiteOpenHelper {
         }
         if (o < 4) {
             migrateV3toV4(db);
+        }
+        if (o < 5) {
+            migrateV4toV5(db);
         }
     }
 
@@ -245,6 +250,35 @@ public class Db extends SQLiteOpenHelper {
             p.put("note", "从 rank_event 回灌");
             db.insert("hot_period", null, p);
         }
+    }
+
+    /**
+     * v4 → v5：「去分期 + 掉榜追踪」。
+     *
+     * 用户拍板（2026-11-03）：这个应用更像一个仓库，只要能看到每条帖子的全部信息就行，
+     * 不在意"某时刻整面榜长什么样"的历史回看。于是：
+     *  - hot_period / rank_snapshot 停止写入，已有数据全部清掉（表结构保留， downgrade 无痛）；
+     *  - 榜面展示改从 rank_event 最新一轮取（rank_event 逐轮名次照记，轨迹不丢）；
+     *  - threads 补 last_in_list_ts 列：每轮热榜都会回写，掉榜追踪按它判断"掉了多久"。
+     */
+    private void migrateV4toV5(SQLiteDatabase db) {
+        createV2(db);   // IF NOT EXISTS 兜底
+        ensureColumn(db, "threads", "last_in_list_ts", "INTEGER DEFAULT 0");
+        db.execSQL("DELETE FROM hot_period");
+        db.execSQL("DELETE FROM rank_snapshot");
+    }
+
+    /** 单列补齐：列不存在才 ALTER（老库升级 / 新库 createV2 已带列时都不出错） */
+    private void ensureColumn(SQLiteDatabase db, String table, String col, String decl) {
+        Cursor c = db.rawQuery("PRAGMA table_info(" + table + ")", null);
+        try {
+            while (c.moveToNext()) {
+                if (col.equals(c.getString(1))) return;
+            }
+        } finally {
+            c.close();
+        }
+        db.execSQL("ALTER TABLE " + table + " ADD COLUMN " + col + " " + decl);
     }
 
     /**
@@ -494,14 +528,15 @@ public class Db extends SQLiteOpenHelper {
         }
     }
 
-    // ------------------------------------------------------------ 写入：热榜期快照
+    // ------------------------------------------------------------ 写入：热榜名次
 
     /**
-     * 落一期热榜：写期头 + 每帖一行快照（哪怕名次没变也写）。
-     * 同时更新 threads 的当前名次，并把整条 hot item 当详情写进 threads
-     * （hot 接口自带 content 全文 + img_paths + 计数，/thread/info 已死也无所谓）。
+     * v5：落一轮热榜。只做两件事——
+     *  1) 名次变化才写一行 rank_event（详情页名次轨迹的数据源，照旧）；
+     *  2) 每个在榜帖回写 threads.hot_rank/hot_val/hot_seen_ts + last_in_list_ts（掉榜追踪的判定依据）。
+     * 期头 hot_period 与每帖一行 rank_snapshot 已停写（v4→v5 迁移时清空）。
      *
-     * 返回本期在榜条数。
+     * 返回本轮名次变化条数。
      */
     public int saveHotPeriod(long ts, JSONArray hot, String note) {
         int n = 0;
@@ -509,42 +544,8 @@ public class Db extends SQLiteOpenHelper {
         SQLiteDatabase db = getWritableDatabase();
         db.beginTransaction();
         try {
-            ContentValues p = new ContentValues();
-            p.put("ts", ts);
-            p.put("in_list", hot.length());
-            p.put("raw_json", hot.toString());
-            p.put("note", note == null ? "" : note);
-            db.insertWithOnConflict("hot_period", null, p, SQLiteDatabase.CONFLICT_REPLACE);
-
-            for (int i = 0; i < hot.length(); i++) {
-                JSONObject t = hot.optJSONObject(i);
-                if (t == null) continue;
-                String tid = t.optString("thread_id");
-                if (tid.length() == 0) continue;
-                int rank = t.optInt("hot_rank");
-                String hv = t.optString("hot_val");
-                String title = t.optString("title");
-
-                ContentValues v = new ContentValues();
-                v.put("ts", ts);
-                v.put("thread_id", tid);
-                v.put("rank", rank);
-                v.put("hot_val", hv);
-                v.put("hot_text", t.optString("hot_text"));
-                v.put("view_count", t.optInt("view_count"));
-                v.put("c_count", t.optString("c_count"));
-                v.put("l_count", t.optString("l_count"));
-                v.put("title", title);
-                v.put("raw_json", t.toString());
-                db.insert("rank_snapshot", null, v);
-                n++;
-            }
-
-            // 名次变化事件仍然记（详情页的名次轨迹要用）
-            saveRankEventsLocked(db, ts, hot);
+            n = saveRankEventsLocked(db, ts, hot);
             db.setTransactionSuccessful();
-        } catch (Exception e) {
-            // 期快照失败不影响主流程
         } finally {
             db.endTransaction();
         }
@@ -587,6 +588,7 @@ public class Db extends SQLiteOpenHelper {
             tv.put("hot_rank", rank);
             tv.put("hot_val", hv);
             tv.put("hot_seen_ts", ts);
+            tv.put("last_in_list_ts", ts);   // v5：掉榜追踪的"最后在榜时间"
             db.update("threads", tv, "thread_id=?", new String[]{tid});
         }
         return changed;
@@ -1016,28 +1018,31 @@ public class Db extends SQLiteOpenHelper {
         return 0;
     }
 
-    // ------------------------------------------------------------ 读取：热榜期
+    // ------------------------------------------------------------ 读取：热榜（v5 从 rank_event 取）
 
-    /** 最新一期热榜的榜面（rank 升序）。无期返回空游标 */
+    /**
+     * 最新一轮热榜榜面：rank_event 里最新 ts 的那批记录。
+     * rank_event 只在名次变化时写行，所以最新一轮里只有变化过的帖——
+     * 真正的"当前在榜"以 threads.hot_seen_ts（每轮无条件回写）为准：
+     * hot_seen_ts = 最新轮 ts 的帖子就是本轮在榜帖，名次读 threads.hot_rank。
+     * 列序与旧 boardOf 相同：rank, thread_id, title, hot_val, hot_text, view_count, c_count, l_count。
+     */
     public Cursor latestHotBoard() {
-        long ts = latestPeriodTs();
-        return boardOf(ts);
-    }
-
-    /** 指定期 ts 的榜面（title 缺失时从 threads 表补，迁移回灌的老期没有 title） */
-    public Cursor boardOf(long ts) {
         return getReadableDatabase().rawQuery(
-                "SELECT s.rank, s.thread_id, COALESCE(NULLIF(s.title,''), t.title)," +
-                        " s.hot_val, s.hot_text, s.view_count, s.c_count, s.l_count" +
-                        " FROM rank_snapshot s LEFT JOIN threads t ON t.thread_id = s.thread_id" +
-                        " WHERE s.ts=? ORDER BY s.rank ASC",
-                new String[]{String.valueOf(ts)});
+                "SELECT t.hot_rank, t.thread_id, t.title," +
+                        " t.hot_val, '', t.view_count, t.c_count, t.l_count" +
+                        " FROM threads t" +
+                        " WHERE t.hot_seen_ts = (SELECT MAX(hot_seen_ts) FROM threads" +
+                        "   WHERE hot_seen_ts IS NOT NULL AND hot_seen_ts > 0)" +
+                        " AND t.hot_rank > 0" +
+                        " ORDER BY t.hot_rank ASC", null);
     }
 
-    /** 最新一期 ts；没有期返回 0 */
+    /** 最新一轮热榜的抓取时间（threads.hot_seen_ts 的最大值）；没抓过返回 0 */
     public long latestPeriodTs() {
         Cursor c = getReadableDatabase().rawQuery(
-                "SELECT MAX(ts) FROM hot_period", null);
+                "SELECT MAX(hot_seen_ts) FROM threads WHERE hot_seen_ts IS NOT NULL AND hot_seen_ts > 0",
+                null);
         try {
             if (c.moveToFirst() && !c.isNull(0)) return c.getLong(0);
         } catch (Exception ignore) {
@@ -1047,39 +1052,58 @@ public class Db extends SQLiteOpenHelper {
         return 0;
     }
 
-    /** 历史期数列表：ts 倒序。includeBackfill=false 时隐藏 v3 回灌的残缺伪期 */
-    public Cursor periods(boolean includeBackfill) {
-        String where = includeBackfill ? "" : " WHERE p.note NOT LIKE '%回灌%'";
-        return getReadableDatabase().rawQuery(
-                "SELECT p.ts, p.in_list, p.note, p.raw_json," +
-                        " (SELECT COUNT(*) FROM rank_snapshot s WHERE s.ts=p.ts) AS rows" +
-                        " FROM hot_period p" + where + " ORDER BY p.ts DESC", null);
-    }
+    // ------------------------------------------------------------ 掉榜追踪（v5）
 
-    /** 回灌伪期的条数（期数页底部提示用） */
-    public int countBackfillPeriods() {
+    /** 追踪窗口：掉榜后继续追 24 小时 */
+    public static final long TRACK_WINDOW_MS = 24L * 3600L * 1000L;
+
+    /** 每轮最多补抓多少个掉榜帖 */
+    public static final int TRACK_BATCH = 5;
+
+    /**
+     * 选出本轮要追踪补抓的掉榜帖：
+     *  - 上过热榜（last_in_list_ts > 0）；
+     *  - 现在不在榜上（hot_seen_ts < 最新轮 ts，或还没等到下一轮）；
+     *  - 掉榜未满 24h（last_in_list_ts 距今不超过窗口）；
+     *  - 本轮榜面里没有它（由调用方传入排除集）；
+     * 掉榜最老的优先。列：thread_id。
+     */
+    public java.util.List<String> trackCandidates(long nowMs, Set<String> exclude) {
+        java.util.List<String> out = new ArrayList<String>();
+        long latest = latestPeriodTs();
+        if (latest <= 0) return out;   // 还没抓过任何热榜，谈不上掉榜
         Cursor c = getReadableDatabase().rawQuery(
-                "SELECT COUNT(*) FROM hot_period WHERE note LIKE '%回灌%'", null);
+                "SELECT thread_id FROM threads" +
+                        " WHERE last_in_list_ts > 0" +
+                        " AND last_in_list_ts >= ?" +     // 24h 内还在过榜
+                        " AND (hot_seen_ts IS NULL OR hot_seen_ts < ?)" +  // 本轮不在榜
+                        " ORDER BY last_in_list_ts ASC LIMIT 30",
+                new String[]{String.valueOf(nowMs - TRACK_WINDOW_MS),
+                        String.valueOf(latest)});
         try {
-            if (c.moveToFirst()) return c.getInt(0);
+            while (c.moveToNext()) {
+                String tid = c.getString(0);
+                if (exclude != null && exclude.contains(tid)) continue;
+                out.add(tid);
+                if (out.size() >= TRACK_BATCH) break;
+            }
         } finally {
             c.close();
         }
-        return 0;
+        return out;
     }
 
-    public int countPeriods() {
-        Cursor c = getReadableDatabase().rawQuery("SELECT COUNT(*) FROM hot_period", null);
-        try {
-            if (c.moveToFirst()) return c.getInt(0);
-        } finally {
-            c.close();
-        }
-        return 0;
-    }
-
-    public int countSnapshots() {
-        Cursor c = getReadableDatabase().rawQuery("SELECT COUNT(*) FROM rank_snapshot", null);
+    /** 正在被追踪（掉榜未满 24h）的帖子数——统计页「追踪中 N 帖」用 */
+    public int countTracking(long nowMs) {
+        long latest = latestPeriodTs();
+        if (latest <= 0) return 0;
+        Cursor c = getReadableDatabase().rawQuery(
+                "SELECT COUNT(*) FROM threads" +
+                        " WHERE last_in_list_ts > 0" +
+                        " AND last_in_list_ts >= ?" +
+                        " AND (hot_seen_ts IS NULL OR hot_seen_ts < ?)",
+                new String[]{String.valueOf(nowMs - TRACK_WINDOW_MS),
+                        String.valueOf(latest)});
         try {
             if (c.moveToFirst()) return c.getInt(0);
         } finally {

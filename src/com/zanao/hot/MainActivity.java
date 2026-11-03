@@ -31,15 +31,17 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 
 /**
- * 主界面 v4：四个页签 —— 实时热榜 / 历史期数 / 全部帖 / 搜索。
+ * 主界面 v5：三个页签 —— 实时热榜 / 全部帖 / 搜索。
  *
- * v4 是对 v2 的纠偏：v2 把首页做成"按时间倒序的全部帖子流"，热榜名次只降级成行首角标，
- * 于是"某时刻热榜长什么样"根本看不出来。v4 把热榜提回主角：
+ * v5（去分期 + 掉榜追踪）：用户定位这个应用是"仓库"——能看到每条帖子的全部信息就行，
+ * 不在意"某时刻整面榜长什么样"的历史回看。于是：
  *
- *  - 实时热榜：读最新一期 rank_snapshot，rank 1~10 + 标题 + 热度文本 + 浏览/评论
- *  - 历史期数：hot_period 倒序列出每一轮抓取，点进去看那一期的完整榜面
- *  - 全部帖：保留原来的时间流（附带热榜角标），用来翻老帖
+ *  - 实时热榜：threads 里 hot_seen_ts=最新轮 的在榜帖（rank 1~10 + 标题 + 热度 + 浏览/评论），
+ *    榜面照看；名次轨迹/热度曲线继续存在 rank_event 里，详情页不丢
+ *  - 历史期数：删掉（hot_period / rank_snapshot 已停写并清空）
+ *  - 全部帖：时间流（附带热榜角标），用来翻老帖
  *  - 搜索：本地 SQLite 标题/正文 LIKE，标题命中排前，正文命中给摘录行
+ *  - 掉榜追踪：上过榜、掉榜未满 24h 的帖子每轮补抓评论，统计页显示「追踪中 N 帖」
  */
 public class MainActivity extends Activity {
 
@@ -54,9 +56,8 @@ public class MainActivity extends Activity {
 
     /** 页签 */
     private static final int TAB_HOT = 0;
-    private static final int TAB_PERIODS = 1;
-    private static final int TAB_ALL = 2;
-    private static final int TAB_SEARCH = 3;
+    private static final int TAB_ALL = 1;
+    private static final int TAB_SEARCH = 2;
 
     private Db db;
     private LinearLayout listBox;
@@ -67,9 +68,7 @@ public class MainActivity extends Activity {
     private long loadedBefore = 0;     // 已渲染到的最老 posted_at（全部帖页签用）
     private boolean loading = false;
     private int tab = TAB_HOT;
-    /** 期数页签里点开某期后，这里记着那一期的 ts；0 表示正在看期数列表 */
-    private long viewPeriodTs = 0;
-    private final Button[] tabButtons = new Button[4];
+    private final Button[] tabButtons = new Button[3];
     /** 搜索页签：输入框与当前生效的关键词 */
     private EditText searchBox;
     private String searchQuery = "";
@@ -199,10 +198,9 @@ public class MainActivity extends Activity {
         tabs.setBackgroundColor(0xFFF5F5F5);
 
         tabButtons[TAB_HOT] = tabButton("实时热榜", TAB_HOT);
-        tabButtons[TAB_PERIODS] = tabButton("历史期数", TAB_PERIODS);
         tabButtons[TAB_ALL] = tabButton("全部帖", TAB_ALL);
         tabButtons[TAB_SEARCH] = tabButton("搜索", TAB_SEARCH);
-        for (int i = 0; i < 4; i++) tabs.addView(tabButtons[i]);
+        for (int i = 0; i < 3; i++) tabs.addView(tabButtons[i]);
         root.addView(tabs);
 
         // 搜索输入行（只在搜索页签可见）
@@ -321,7 +319,6 @@ public class MainActivity extends Activity {
         b.setOnClickListener(new View.OnClickListener() {
             public void onClick(View v) {
                 tab = which;
-                if (which == TAB_PERIODS) viewPeriodTs = 0;
                 reload();
             }
         });
@@ -329,7 +326,7 @@ public class MainActivity extends Activity {
     }
 
     private void paintTabs() {
-        for (int i = 0; i < 4; i++) {
+        for (int i = 0; i < 3; i++) {
             Button b = tabButtons[i];
             if (b == null) continue;
             b.setTextColor(i == tab ? 0xFFE53935 : 0xFF666666);
@@ -350,19 +347,9 @@ public class MainActivity extends Activity {
         listBox.removeAllViews();
         loadedBefore = 0;
         if (tab == TAB_HOT) {
-            int n = renderHotBoard(db.latestPeriodTs());
+            int n = renderHotBoard();
             if (n == 0) status.setText("还没有热榜存档，点「刷新」抓一轮");
             else updateStatus();
-        } else if (tab == TAB_PERIODS) {
-            if (viewPeriodTs > 0) {
-                int n = renderHotBoard(viewPeriodTs);
-                if (n == 0) status.setText("这一期没有榜面记录");
-                else updateStatus();
-            } else {
-                int n = renderPeriods();
-                if (n == 0) status.setText("还没有任何一期，点「刷新」抓一轮");
-                else updateStatus();
-            }
         } else if (tab == TAB_SEARCH) {
             if (searchQuery.length() == 0) {
                 status.setText("输入关键词，在已抓到的帖子标题和正文里找");
@@ -510,23 +497,24 @@ public class MainActivity extends Activity {
     // ---------------------------------------------------------------- 热榜榜面
 
     /**
-     * 渲染一期榜面：rank 徽标 + 标题 + 热度文本 + 浏览/评论/赞。
+     * 渲染最新热榜：rank 徽标 + 标题 + 热度文本 + 浏览/评论/赞。
+     * v5 起数据源是 threads 里 hot_seen_ts=最新轮 的在榜帖（不再有期表）。
      * 返回渲染条数。点击行进入帖子详情。
      */
-    private int renderHotBoard(long ts) {
+    private int renderHotBoard() {
+        long ts = db.latestPeriodTs();
         if (ts <= 0) return 0;
 
-        // 期头信息
+        // 榜头信息
         TextView head = new TextView(this);
         head.setTextSize(12);
         head.setTextColor(0xFF888888);
         head.setPadding(dp(12), dp(8), dp(12), dp(6));
-        head.setText("第 " + Db.periodOf(ts) + " 期 · "
-                + new SimpleDateFormat("MM-dd HH:mm", Locale.US).format(new Date(ts))
-                + " 抓取" + (tab == TAB_PERIODS ? "（历史回看）" : "（最新）"));
+        head.setText(new SimpleDateFormat("MM-dd HH:mm", Locale.US).format(new Date(ts))
+                + " 抓取 · 当前在榜");
         listBox.addView(head);
 
-        Cursor c = db.boardOf(ts);
+        Cursor c = db.latestHotBoard();
         int n = 0;
         try {
             while (c.moveToNext()) {
@@ -603,85 +591,6 @@ public class MainActivity extends Activity {
             }
         } finally {
             c.close();
-        }
-
-        if (tab == TAB_PERIODS && viewPeriodTs > 0) {
-            Button back = new Button(this);
-            back.setText("← 返回期数列表");
-            back.setOnClickListener(new View.OnClickListener() {
-                public void onClick(View v) {
-                    viewPeriodTs = 0;
-                    reload();
-                }
-            });
-            listBox.addView(back);
-        }
-        return n;
-    }
-
-    // ---------------------------------------------------------------- 期数列表
-
-    private int renderPeriods() {
-        Cursor c = db.periods(false);
-        int n = 0;
-        try {
-            while (c.moveToNext()) {
-                n++;
-                final long ts = c.getLong(0);
-                int inList = c.getInt(1);
-                String note = c.getString(2);
-                int rows = c.getInt(4);
-
-                LinearLayout row = new LinearLayout(this);
-                row.setOrientation(LinearLayout.VERTICAL);
-                row.setPadding(dp(12), dp(10), dp(12), dp(10));
-                row.setBackgroundColor(Color.WHITE);
-
-                TextView t1 = new TextView(this);
-                t1.setText("第 " + Db.periodOf(ts) + " 期");
-                t1.setTextSize(15);
-                t1.setTextColor(Color.BLACK);
-                row.addView(t1);
-
-                TextView t2 = new TextView(this);
-                StringBuilder sb = new StringBuilder();
-                sb.append(new SimpleDateFormat("MM-dd HH:mm", Locale.US)
-                        .format(new Date(ts)));
-                sb.append(" · 在榜 ").append(inList).append(" 条");
-                if (rows != inList) sb.append(" · 榜面 ").append(rows).append(" 行");
-                if (note != null && note.length() > 0) sb.append(" · ").append(note);
-                t2.setText(sb.toString());
-                t2.setTextSize(12);
-                t2.setTextColor(0xFF888888);
-                row.addView(t2);
-
-                row.setOnClickListener(new View.OnClickListener() {
-                    public void onClick(View v) {
-                        viewPeriodTs = ts;
-                        reload();
-                    }
-                });
-                listBox.addView(row);
-
-                View sep = new View(this);
-                sep.setLayoutParams(new LinearLayout.LayoutParams(
-                        ViewGroup.LayoutParams.MATCH_PARENT, dp(1)));
-                sep.setBackgroundColor(0xFFEEEEEE);
-                listBox.addView(sep);
-            }
-        } finally {
-            c.close();
-        }
-
-        int backfill = db.countBackfillPeriods();
-        if (backfill > 0) {
-            TextView tail = new TextView(this);
-            tail.setTextSize(11);
-            tail.setTextColor(0xFFAAAAAA);
-            tail.setPadding(dp(12), dp(10), dp(12), dp(14));
-            tail.setText("另有 " + backfill + " 期是 v3 名次事件回灌的残缺期（只记了变化过的帖，"
-                    + "不是完整榜面），已隐藏。v4 起每轮都会存完整 top 10。");
-            listBox.addView(tail);
         }
         return n;
     }
@@ -815,11 +724,11 @@ public class MainActivity extends Activity {
         int threads = db.countThreads();
         int comments = db.countComments();
         int hist = db.countCommentHistory();
-        int periods = db.countPeriods() - db.countBackfillPeriods();
+        int tracking = db.countTracking(System.currentTimeMillis());
         long lastTs = db.metaLong("last_fetch_ts", 0);
         StringBuilder sb = new StringBuilder();
-        sb.append(periods).append(" 期 · ").append(threads).append(" 帖 · ")
-                .append(comments).append(" 条评论");
+        sb.append(threads).append(" 帖 · ").append(comments).append(" 条评论");
+        if (tracking > 0) sb.append(" · 追踪中 ").append(tracking).append(" 帖");
         if (hist > 0) sb.append(" · ").append(hist).append(" 条评论留了旧版");
         if (lastTs > 0) {
             long m = (System.currentTimeMillis() - lastTs) / 60000L;
@@ -884,21 +793,15 @@ public class MainActivity extends Activity {
         } finally {
             c.close();
         }
-        int periods = db.countPeriods() - db.countBackfillPeriods();
-        int backfill = db.countBackfillPeriods();
-        int snaps = db.countSnapshots();
+        int tracking = db.countTracking(System.currentTimeMillis());
 
         StringBuilder sb = new StringBuilder();
-        sb.append("热榜期数 ").append(periods).append(" 期（每轮一行，含整期榜面 JSON）\n");
-        if (backfill > 0) {
-            sb.append("另有 ").append(backfill).append(" 期是从 v3 名次事件回灌的残缺期（只有 2~3 条，不是完整榜面）\n");
-        }
-        sb.append("期快照 ").append(snaps).append(" 行（每期每帖一行）\n");
         sb.append("帖子 ").append(threads).append(" 条（一条帖只有一行）\n");
         sb.append("评论 ").append(comments).append(" 条（只增不删）\n");
         sb.append("评论旧版 ").append(chist).append(" 条（被删前的原话）\n");
         sb.append("正文旧版 ").append(dhist).append(" 条（改过的正文）\n");
-        sb.append("名次事件 ").append(rankEvents).append(" 条（只在名次变化时记）\n");
+        sb.append("名次事件 ").append(rankEvents).append(" 条（名次变化时记，轨迹/热度曲线数据源）\n");
+        sb.append("追踪中 ").append(tracking).append(" 帖（掉榜未满 24 小时，每轮补抓评论）\n");
         sb.append("图片 ").append(imgRefs).append(" 个 URL → ")
                 .append(ImgCache.size(this) / 1024).append(" KB 本地文件\n");
         sb.append("图片按内容去重，同一张图只存一份\n");
@@ -911,9 +814,10 @@ public class MainActivity extends Activity {
             sb.append("（").append(m).append(" 分钟前）");
         }
 
-        sb.append("\n\n每轮动作：拉 /thread/hot 取 top 10 → 写一期快照（期头 + 每帖一行）");
-        sb.append(" → 在榜帖正文/评论/图片入库。热榜条目自带正文全文与图片列表，");
-        sb.append("所以不依赖已降级的 /thread/info。热榜前 10 变化慢，15~30 分钟一轮足够。");
+        sb.append("\n\n每轮动作：拉 /thread/hot 取 top 10 → 记名次事件 + 在榜回写");
+        sb.append(" → 在榜帖正文/评论/图片入库 → 掉榜未满 24h 的帖子每轮补 5 个拉评论。");
+        sb.append("热榜条目自带正文全文与图片列表，不依赖已降级的 /thread/info。");
+        sb.append("热榜前 10 变化慢，15~30 分钟一轮足够。");
 
         new AlertDialog.Builder(this)
                 .setTitle("存档统计")
@@ -991,7 +895,8 @@ public class MainActivity extends Activity {
         box.addView(iv);
 
         TextView wHint = new TextView(this);
-        wHint.setText("\n说明：每轮只拉 /thread/hot 的 top 10 并存成一期快照。"
+        wHint.setText("\n说明：每轮拉 /thread/hot 的 top 10，记名次并更新在榜帖；"
+                + "掉榜未满 24 小时的帖子每轮再补 5 个拉评论。"
                 + "热榜前 10 变化很慢（几分钟到几小时才动一次），15~30 分钟一轮就够，"
                 + "不会像新帖流那样漏数据。建议 15 分钟（最小 " + AutoReceiver.MIN_INTERVAL + " 分钟）。");
         wHint.setTextSize(12);
