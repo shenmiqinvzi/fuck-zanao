@@ -31,7 +31,7 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 
 /**
- * 主界面 v4：三个页签 —— 实时热榜 / 历史期数 / 全部帖。
+ * 主界面 v4：四个页签 —— 实时热榜 / 历史期数 / 全部帖 / 搜索。
  *
  * v4 是对 v2 的纠偏：v2 把首页做成"按时间倒序的全部帖子流"，热榜名次只降级成行首角标，
  * 于是"某时刻热榜长什么样"根本看不出来。v4 把热榜提回主角：
@@ -39,6 +39,7 @@ import java.util.concurrent.Executors;
  *  - 实时热榜：读最新一期 rank_snapshot，rank 1~10 + 标题 + 热度文本 + 浏览/评论
  *  - 历史期数：hot_period 倒序列出每一轮抓取，点进去看那一期的完整榜面
  *  - 全部帖：保留原来的时间流（附带热榜角标），用来翻老帖
+ *  - 搜索：本地 SQLite 标题/正文 LIKE，标题命中排前，正文命中给摘录行
  */
 public class MainActivity extends Activity {
 
@@ -55,6 +56,7 @@ public class MainActivity extends Activity {
     private static final int TAB_HOT = 0;
     private static final int TAB_PERIODS = 1;
     private static final int TAB_ALL = 2;
+    private static final int TAB_SEARCH = 3;
 
     private Db db;
     private LinearLayout listBox;
@@ -67,7 +69,15 @@ public class MainActivity extends Activity {
     private int tab = TAB_HOT;
     /** 期数页签里点开某期后，这里记着那一期的 ts；0 表示正在看期数列表 */
     private long viewPeriodTs = 0;
-    private final Button[] tabButtons = new Button[3];
+    private final Button[] tabButtons = new Button[4];
+    /** 搜索页签：输入框与当前生效的关键词 */
+    private EditText searchBox;
+    private String searchQuery = "";
+    private LinearLayout searchBarRef;
+    /** 搜索输入防抖：300ms 内连续输入只查最后一次 */
+    private final Runnable searchDebounce = new Runnable() {
+        public void run() { doSearch(); }
+    };
 
     @Override
     protected void onCreate(Bundle b) {
@@ -191,8 +201,54 @@ public class MainActivity extends Activity {
         tabButtons[TAB_HOT] = tabButton("实时热榜", TAB_HOT);
         tabButtons[TAB_PERIODS] = tabButton("历史期数", TAB_PERIODS);
         tabButtons[TAB_ALL] = tabButton("全部帖", TAB_ALL);
-        for (int i = 0; i < 3; i++) tabs.addView(tabButtons[i]);
+        tabButtons[TAB_SEARCH] = tabButton("搜索", TAB_SEARCH);
+        for (int i = 0; i < 4; i++) tabs.addView(tabButtons[i]);
         root.addView(tabs);
+
+        // 搜索输入行（只在搜索页签可见）
+        LinearLayout searchBar = new LinearLayout(this);
+        searchBar.setOrientation(LinearLayout.HORIZONTAL);
+        searchBar.setPadding(dp(12), dp(8), dp(12), dp(8));
+        searchBar.setBackgroundColor(Color.WHITE);
+        searchBar.setVisibility(View.GONE);
+
+        searchBox = new EditText(this);
+        searchBox.setHint("搜标题 / 正文关键词");
+        searchBox.setTextSize(14);
+        searchBox.setSingleLine(true);
+        searchBox.setInputType(InputType.TYPE_CLASS_TEXT);
+        searchBox.setImeOptions(android.view.inputmethod.EditorInfo.IME_ACTION_SEARCH);
+        searchBox.setLayoutParams(new LinearLayout.LayoutParams(0,
+                ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
+        searchBox.addTextChangedListener(new android.text.TextWatcher() {
+            public void beforeTextChanged(CharSequence s, int a, int b2, int c) { }
+            public void onTextChanged(CharSequence s, int a, int b2, int c) { }
+            public void afterTextChanged(android.text.Editable s) {
+                ui.removeCallbacks(searchDebounce);
+                ui.postDelayed(searchDebounce, 300);
+            }
+        });
+        searchBox.setOnEditorActionListener(new TextView.OnEditorActionListener() {
+            public boolean onEditorAction(TextView v, int actionId, android.view.KeyEvent e) {
+                ui.removeCallbacks(searchDebounce);
+                doSearch();
+                return true;
+            }
+        });
+        searchBar.addView(searchBox);
+
+        Button searchClear = new Button(this);
+        searchClear.setText("×");
+        searchClear.setTextSize(16);
+        searchClear.setPadding(dp(10), 0, dp(10), 0);
+        searchClear.setOnClickListener(new View.OnClickListener() {
+            public void onClick(View v) {
+                searchBox.setText("");
+            }
+        });
+        searchBar.addView(searchClear);
+        root.addView(searchBar);
+        searchBarRef = searchBar;
 
         LinearLayout bar = new LinearLayout(this);
         bar.setOrientation(LinearLayout.HORIZONTAL);
@@ -273,10 +329,13 @@ public class MainActivity extends Activity {
     }
 
     private void paintTabs() {
-        for (int i = 0; i < 3; i++) {
+        for (int i = 0; i < 4; i++) {
             Button b = tabButtons[i];
             if (b == null) continue;
             b.setTextColor(i == tab ? 0xFFE53935 : 0xFF666666);
+        }
+        if (searchBarRef != null) {
+            searchBarRef.setVisibility(tab == TAB_SEARCH ? View.VISIBLE : View.GONE);
         }
     }
 
@@ -304,12 +363,139 @@ public class MainActivity extends Activity {
                 if (n == 0) status.setText("还没有任何一期，点「刷新」抓一轮");
                 else updateStatus();
             }
+        } else if (tab == TAB_SEARCH) {
+            if (searchQuery.length() == 0) {
+                status.setText("输入关键词，在已抓到的帖子标题和正文里找");
+            } else {
+                int n = renderSearch(searchQuery);
+                if (n == 0) status.setText("「" + searchQuery + "」没有匹配的帖子");
+                else status.setText("「" + searchQuery + "」匹配 " + n + " 帖");
+            }
         } else {
             int n = renderFeed(0);
             if (n == 0) status.setText("本地还没有存档，点「刷新」抓一次");
             else updateStatus();
         }
         sv.scrollTo(0, 0);
+    }
+
+    /** 搜索页签的防抖入口：输入停 300ms 或点键盘搜索键才真正查询 */
+    private void doSearch() {
+        if (tab != TAB_SEARCH) return;
+        String q = searchBox.getText().toString().trim();
+        if (q.equals(searchQuery)) return;
+        searchQuery = q;
+        reload();
+    }
+
+    // ---------------------------------------------------------------- 搜索结果
+
+    /** 搜索结果列表：行样式复用全部帖的时间流（renderFeed 同款列序） */
+    private int renderSearch(String q) {
+        Cursor c = db.searchThreads(q, 200);
+        int n = 0;
+        try {
+            while (c.moveToNext()) {
+                n++;
+                final String tid = c.getString(0);
+                long posted = c.getLong(1);
+                String t = c.getString(2);
+                String cate = c.getString(3);
+                String cc = c.getString(4);
+                String lc = c.getString(5);
+                int vc = c.getInt(6);
+                int rank = c.getInt(7);
+                String content = c.getString(8);
+                String nick = c.getString(9);
+                int hasDetail = c.getInt(10);
+
+                LinearLayout row = new LinearLayout(this);
+                row.setOrientation(LinearLayout.VERTICAL);
+                row.setPadding(dp(12), dp(10), dp(12), dp(10));
+                row.setBackgroundColor(Color.WHITE);
+
+                LinearLayout headLine = new LinearLayout(this);
+                headLine.setOrientation(LinearLayout.HORIZONTAL);
+
+                if (rank > 0) {
+                    TextView badge = new TextView(this);
+                    badge.setText("榜" + rank);
+                    badge.setTextSize(11);
+                    badge.setTextColor(Color.WHITE);
+                    badge.setBackgroundColor(0xFFFF6B4A);
+                    badge.setPadding(dp(5), dp(1), dp(5), dp(1));
+                    LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(
+                            ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+                    lp.rightMargin = dp(6);
+                    lp.topMargin = dp(2);
+                    headLine.addView(badge, lp);
+                }
+
+                TextView head = new TextView(this);
+                String shown = t;
+                if (shown == null || shown.length() == 0) {
+                    shown = content == null ? "" : oneLine(content, 40);
+                }
+                if (shown.length() == 0) {
+                    shown = hasDetail == 1 ? "（无标题 · 纯图帖）" : "（无标题）";
+                }
+                head.setText(shown);
+                head.setTextSize(15);
+                head.setTextColor(Color.BLACK);
+                head.setLayoutParams(new LinearLayout.LayoutParams(0,
+                        ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
+                headLine.addView(head);
+                row.addView(headLine);
+
+                // 命中上下文：标题没中、正文中了时给一行正文摘录
+                boolean titleHit = t != null && t.toLowerCase(Locale.US).contains(q.toLowerCase(Locale.US));
+                if (!titleHit && content != null && content.length() > 0) {
+                    String low = content.toLowerCase(Locale.US);
+                    int idx = low.indexOf(q.toLowerCase(Locale.US));
+                    if (idx >= 0) {
+                        int from = Math.max(0, idx - 12);
+                        String ctx = content.substring(from, Math.min(content.length(), idx + q.length() + 24));
+                        TextView hit = new TextView(this);
+                        hit.setText("… " + ctx.replace('\n', ' ').replace('\r', ' ').trim() + " …");
+                        hit.setTextSize(12);
+                        hit.setTextColor(0xFFE53935);
+                        hit.setPadding(0, dp(3), 0, 0);
+                        row.addView(hit);
+                    }
+                }
+
+                TextView meta = new TextView(this);
+                StringBuilder sb = new StringBuilder();
+                sb.append(timeText(posted));
+                if (cate != null && cate.length() > 0) sb.append(" · ").append(cate);
+                if (nick != null && nick.length() > 0) sb.append(" · ").append(nick);
+                sb.append(" · 评论 ").append(cc == null ? "0" : cc);
+                sb.append(" · 赞 ").append(lc == null ? "0" : lc);
+                sb.append(" · 浏览 ").append(briefViews(vc));
+                meta.setText(sb.toString());
+                meta.setTextSize(12);
+                meta.setTextColor(0xFF888888);
+                row.addView(meta);
+
+                row.setOnClickListener(new View.OnClickListener() {
+                    public void onClick(View v) {
+                        Intent i = new Intent(MainActivity.this, ThreadActivity.class);
+                        i.putExtra("thread_id", tid);
+                        startActivity(i);
+                    }
+                });
+                listBox.addView(row);
+
+                View sep = new View(this);
+                sep.setLayoutParams(new LinearLayout.LayoutParams(
+                        ViewGroup.LayoutParams.MATCH_PARENT, dp(1)));
+                sep.setBackgroundColor(0xFFEEEEEE);
+                listBox.addView(sep);
+            }
+        } finally {
+            c.close();
+        }
+        return n;
     }
 
     private void loadMore() {
