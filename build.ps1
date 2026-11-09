@@ -5,6 +5,8 @@
 #   .\build.ps1 -Token "xxxxx"           # 把 token 编进 APK 的默认值
 #   .\build.ps1 -Clean                   # 先清空 out
 #   .\build.ps1 -Sdk "D:\android-sdk"    # 指定 SDK 根目录（含 build-tools 与 platforms）
+#   .\build.ps1 -Ks "keys\zanao.jks" -KsPass "口令"   # 指定签名 keystore（仓库不带私钥）
+#   $env:ZANAO_KS_PASS="口令"; .\build.ps1 -Ks "keys\zanao.jks"   # 口令走环境变量，避免进命令历史
 #
 # 前置：
 #   JDK 8+ 在 JAVA_HOME（本机实测 JDK 25 可用）
@@ -26,7 +28,9 @@
 param(
     [switch]$Clean,
     [string]$Token = "",
-    [string]$Sdk = ""
+    [string]$Sdk = "",
+    [string]$Ks = "",
+    [string]$KsPass = ""
 )
 
 $ErrorActionPreference = 'Stop'
@@ -35,6 +39,12 @@ $proj = Split-Path -Parent $MyInvocation.MyCommand.Path
 $out  = Join-Path $proj 'out'
 $jdk  = $env:JAVA_HOME
 if (-not $jdk) { throw 'JAVA_HOME 未设置' }
+
+# ---- 定位签名 keystore（仓库不携带私钥，自行保管）----
+$ksPath = if ($Ks) { $Ks } elseif ($env:ZANAO_KS) { $env:ZANAO_KS } else { Join-Path $proj 'zanao.jks' }
+$ksPass = if ($KsPass) { $KsPass } elseif ($env:ZANAO_KS_PASS) { $env:ZANAO_KS_PASS } else { '' }
+if (-not (Test-Path $ksPath)) { throw "keystore 不存在：$ksPath（用 -Ks 指定路径，或放到工程根目录 zanao.jks）" }
+if (-not $ksPass) { throw '未提供 keystore 口令：用 -KsPass，或先设 $env:ZANAO_KS_PASS' }
 
 # ---- 定位 SDK ----
 $cands = @()
@@ -134,10 +144,10 @@ Step 'zipalign' {
     & "$bt\zipalign.exe" -f -p 4 "$out\unsigned.apk" "$out\aligned.apk"
 }
 
-# 7) 签名（keystore 口令见 README，换自己的请改这里）
+# 7) 签名（keystore 与口令都不入库：-Ks/-KsPass 或环境变量 ZANAO_KS/ZANAO_KS_PASS）
 Step 'apksigner sign' {
-    & "$bt\apksigner.bat" sign --ks "$proj\zanao.jks" `
-        --ks-pass pass:***REMOVED-PASS*** --key-pass pass:***REMOVED-PASS*** `
+    & "$bt\apksigner.bat" sign --ks "$ksPath" `
+        --ks-pass "pass:$ksPass" --key-pass "pass:$ksPass" `
         --out "$out\zanao_hot_1.0.apk" "$out\aligned.apk"
 }
 

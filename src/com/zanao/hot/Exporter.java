@@ -5,13 +5,17 @@ import android.content.Context;
 import android.content.Intent;
 import android.net.Uri;
 
+import java.io.BufferedInputStream;
 import java.io.File;
 import java.io.FileInputStream;
+import java.io.FileOutputStream;
+import java.io.InputStream;
 import java.io.OutputStream;
 import java.text.SimpleDateFormat;
 import java.util.Date;
 import java.util.Locale;
 import java.util.zip.ZipEntry;
+import java.util.zip.ZipInputStream;
 import java.util.zip.ZipOutputStream;
 
 /**
@@ -41,6 +45,89 @@ public final class Exporter {
         i.setType("application/zip");
         i.putExtra(Intent.EXTRA_TITLE, defaultName());
         a.startActivityForResult(i, reqCode);
+    }
+
+    /** 弹出系统文件选择器，选一个存档 zip 回来 */
+    static void pickSource(Activity a, int reqCode) {
+        Intent i = new Intent(Intent.ACTION_OPEN_DOCUMENT);
+        i.addCategory(Intent.CATEGORY_OPENABLE);
+        i.setType("*/*");
+        a.startActivityForResult(i, reqCode);
+    }
+
+    /**
+     * 从存档 zip 还原数据库与图片（覆盖当前数据）。
+     *
+     * 调用前必须先把已有 Db 连接关掉并置空，否则旧库文件被占用、改名失败。
+     * 导入的库可能是老版本的：Db 打开时会自动迁移到当前 VER。
+     */
+    static String read(Context ctx, Uri src) throws Exception {
+        File dbf = ctx.getDatabasePath("zanao_hot.db");
+        File dir = dbf.getParentFile();
+        if (dir != null && !dir.exists()) dir.mkdirs();
+        File tmpDb = new File(dir, "zanao_hot.db.import");
+        File imgDir = new File(ctx.getFilesDir(), "img");
+        if (!imgDir.exists()) imgDir.mkdirs();
+
+        InputStream in = ctx.getContentResolver().openInputStream(src);
+        if (in == null) throw new Api.IOException2("无法打开存档");
+        int imgCount = 0;
+        boolean hasDb = false;
+        ZipInputStream zip = new ZipInputStream(new BufferedInputStream(in));
+        try {
+            byte[] buf = new byte[8192];
+            ZipEntry e;
+            while ((e = zip.getNextEntry()) != null) {
+                String name = e.getName();
+                if (!e.isDirectory()) {
+                    if (name.equals("zanao_hot.db")) {
+                        FileOutputStream fo = new FileOutputStream(tmpDb);
+                        try {
+                            int n;
+                            while ((n = zip.read(buf)) > 0) fo.write(buf, 0, n);
+                        } finally {
+                            fo.close();
+                        }
+                        hasDb = true;
+                    } else if (name.startsWith("img/")) {
+                        String base = name.substring(4);
+                        // 只取 img/ 下的单层文件名，防止存档里塞 ../ 越界写出
+                        if (base.length() > 0 && base.indexOf('/') < 0 && base.indexOf('\\') < 0) {
+                            File out = new File(imgDir, base);
+                            FileOutputStream fo = new FileOutputStream(out);
+                            try {
+                                int n;
+                                while ((n = zip.read(buf)) > 0) fo.write(buf, 0, n);
+                            } finally {
+                                fo.close();
+                            }
+                            imgCount++;
+                        }
+                    }
+                }
+                zip.closeEntry();
+            }
+        } finally {
+            zip.close();
+        }
+        if (!hasDb) throw new Api.IOException2("存档里没有 zanao_hot.db，不是本应用的导出包");
+
+        // 覆盖：旧库连同 wal/shm 一起清掉，再把导入文件改名到位
+        for (String s : new String[]{"-wal", "-shm"}) {
+            File f = new File(dir, dbf.getName() + s);
+            if (f.exists()) f.delete();
+        }
+        if (dbf.exists() && !dbf.delete()) throw new Api.IOException2("旧数据库删除失败");
+        if (!tmpDb.renameTo(dbf)) throw new Api.IOException2("数据库落位失败");
+
+        Db db = new Db(ctx);
+        try {
+            int threads = count(db, "SELECT COUNT(*) FROM threads");
+            int comments = count(db, "SELECT COUNT(*) FROM comments");
+            return "已导入 " + threads + " 帖 / " + comments + " 条评论 / " + imgCount + " 张图片";
+        } finally {
+            db.close();
+        }
     }
 
     /** 把库和图片写进用户选定的 Uri。返回说明文本 */

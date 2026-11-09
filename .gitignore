@@ -17,3 +17,8 @@ token.txt
 .idea/
 *.log
 Thumbs.db
+
+# 签名私钥（绝不入库：丢了就没法同签名升级，暴露了别人能签你的包）
+*.jks
+*.keystore
+keystore*.txt

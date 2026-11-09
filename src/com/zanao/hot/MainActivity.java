@@ -281,6 +281,22 @@ public class MainActivity extends Activity {
         });
         bar.addView(exp);
 
+        Button imp = new Button(this);
+        imp.setText("导入");
+        imp.setOnClickListener(new View.OnClickListener() {
+            public void onClick(View v) { confirmImport(); }
+        });
+        bar.addView(imp);
+
+        // 五个按钮要挤进一屏（720px 窄屏上「导入」会被挤出屏幕），统一压紧
+        for (int i = 0; i < bar.getChildCount(); i++) {
+            Button b = (Button) bar.getChildAt(i);
+            b.setMinWidth(0);
+            b.setMinimumWidth(0);
+            b.setPadding(dp(3), b.getPaddingTop(), dp(3), b.getPaddingBottom());
+            b.setTextSize(13);
+        }
+
         root.addView(bar);
 
         status = new TextView(this);
@@ -811,14 +827,64 @@ public class MainActivity extends Activity {
     // ---------------------------------------------------------------- 导出
 
     private static final int REQ_EXPORT = 41;
+    private static final int REQ_IMPORT = 42;
 
     private void exportArchive() {
         Exporter.pickTarget(this, REQ_EXPORT);
     }
 
+    /** 导入是覆盖操作：先把话说清楚，再让用户选文件 */
+    private void confirmImport() {
+        new AlertDialog.Builder(this)
+                .setTitle("导入存档")
+                .setMessage("导入会【覆盖】当前的全部帖子、评论和图片，且不可撤销。\n\n"
+                        + "换签名重装（或换手机）时用它把数据搬回来：先在旧版本里「导出」，"
+                        + "装好新版后在这里「导入」同一个 zip。\n\n要继续吗？")
+                .setPositiveButton("选文件", new android.content.DialogInterface.OnClickListener() {
+                    public void onClick(android.content.DialogInterface d, int w) {
+                        Exporter.pickSource(MainActivity.this, REQ_IMPORT);
+                    }
+                })
+                .setNegativeButton("取消", null)
+                .show();
+    }
+
+    private void doImport(final android.net.Uri src) {
+        status.setText("导入中…");
+        // 先关连接：库文件被占用就没法替换（失败路径里也要重新打开）
+        if (db != null) {
+            db.close();
+            db = null;
+        }
+        pool.execute(new Runnable() {
+            public void run() {
+                String msg;
+                try {
+                    msg = Exporter.read(MainActivity.this, src);
+                } catch (final Exception e) {
+                    msg = "导入失败：" + e.getMessage();
+                }
+                final String out = msg;
+                ui.post(new Runnable() {
+                    public void run() {
+                        if (db == null) db = new Db(MainActivity.this);
+                        tab = TAB_HOT;
+                        reload();
+                        status.setText(out);
+                        Toast.makeText(MainActivity.this, out, Toast.LENGTH_LONG).show();
+                    }
+                });
+            }
+        });
+    }
+
     @Override
     protected void onActivityResult(int req, int res, Intent data) {
         super.onActivityResult(req, res, data);
+        if (req == REQ_IMPORT && res == RESULT_OK && data != null && data.getData() != null) {
+            doImport(data.getData());
+            return;
+        }
         if (req == REQ_EXPORT && res == RESULT_OK && data != null && data.getData() != null) {
             final android.net.Uri target = data.getData();
             status.setText("导出中…");
