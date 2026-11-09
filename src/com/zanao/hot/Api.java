@@ -63,6 +63,15 @@ public final class Api {
     // ---------------------------------------------------------------- HTTP
 
     private JSONObject request(String path, LinkedHashMap<String, String> params) throws Exception {
+        return request(path, params, false);
+    }
+
+    /**
+     * @param post true 时把 params 放进 application/x-www-form-urlencoded body，
+     *             签名仍然算同一份 TreeMap（2026-11-09 实测：/user/loginpost 签名方式与 GET 一致，
+     *             算错会直接 errno 6，实测拿到的是业务错误「用户名或密码错误」→ 签名已过）
+     */
+    private JSONObject request(String path, LinkedHashMap<String, String> params, boolean post) throws Exception {
         TreeMap<String, String> sign = new TreeMap<>();
         String rand = newRandNum();
         String ts = String.valueOf(System.currentTimeMillis() / 1000L);
@@ -78,12 +87,12 @@ public final class Api {
             if (qs.length() > 0) qs.append('&');
             qs.append(e.getKey()).append('=').append(URLEncoder.encode(e.getValue(), "UTF-8"));
         }
-        String url = BASE + path + (qs.length() > 0 ? "?" + qs : "");
+        String url = BASE + path + (post || qs.length() == 0 ? "" : "?" + qs);
 
         HttpURLConnection c = null;
         try {
             c = (HttpURLConnection) new URL(url).openConnection();
-            c.setRequestMethod("GET");
+            c.setRequestMethod(post ? "POST" : "GET");
             c.setConnectTimeout(15000);
             c.setReadTimeout(25000);
             c.setRequestProperty("X-Sc-Nd", rand);
@@ -98,6 +107,17 @@ public final class Api {
             c.setRequestProperty("X-Sc-Device", "00000000-53ef-1f0d-ffff-ffffef05ac4a-345076e6d5406f4f");
             c.setRequestProperty("X-Sc-Hb-V", "210");
             c.setRequestProperty("User-Agent", "okhttp/4.10.0");
+
+            if (post) {
+                byte[] body = qs.toString().getBytes("UTF-8");
+                c.setDoOutput(true);
+                c.setRequestProperty("Content-Type", "application/x-www-form-urlencoded; charset=UTF-8");
+                c.setFixedLengthStreamingMode(body.length);
+                java.io.OutputStream out = c.getOutputStream();
+                out.write(body);
+                out.flush();
+                out.close();
+            }
 
             int code = c.getResponseCode();
             if (code != 200) {
@@ -148,6 +168,122 @@ public final class Api {
         Object d = root.opt("data");
         if (d instanceof JSONObject) return (JSONObject) d;
         return null;
+    }
+
+    // ---------------------------------------------------------------- 登录（免抓包）
+
+    /**
+     * 账号密码登录 → 直接换出 token，用户不用抓包。
+     *
+     * 2026-11-09 实测（python 复刻同一份签名算法直连）：
+     *  - POST /user/loginpost  username/密码 走 body，服务端返回
+     *      {"errno":10,"errmsg":"用户名或密码错误"}（凭据错）、errno 6（签名错）
+     *    → 端口真实存在，且是唯一不依赖微信的登录方式
+     *  - POST /user/applogin   code=xxx → {"errno":10,"errmsg":"code非法"}
+     *    → 微信授权码换 token；code 由微信开放平台按【包名 + 签名】下发，
+     *      第三方重打包的 APK 拿不到，所以这条路对分发的 APK 不可用
+     *  - POST /app/devicereg   需要推送 regId，只注册设备，不签发用户 token
+     *  - 无任何「手机号 + 短信验证码」登录口（小程序包里的 /sms/code* 属于 /tutor-api 家教子系统）
+     *  - 官方登录页（assets/prod/static-v2/js/entry.*.js）文案只有：微信登录 / 账号登录 / 用户名 / 密码 / 手机号
+     *
+     * @return 非空 token；失败抛 IOException2，message 已经是人话
+     */
+    public static String loginAccount(String username, String password) throws Exception {
+        String u = username == null ? "" : username.trim();
+        String p = password == null ? "" : password;
+        if (u.length() == 0) throw new IOException2("请填用户名或手机号");
+        if (p.length() == 0) throw new IOException2("请填密码");
+
+        LinkedHashMap<String, String> body = new LinkedHashMap<>();
+        body.put("username", u);
+        body.put("password", p);
+
+        Api probe = new Api("");
+        JSONObject r = probe.request("/user/loginpost", body, true);
+        int errno = r.optInt("errno", -1);
+        if (errno != 0) {
+            String msg = r.optString("errmsg", "");
+            if (errno == 10) {
+                if (msg.contains("用户名") || msg.contains("密码")) {
+                    throw new IOException2("用户名或密码不对。\n"
+                            + "· 这里要的是赞奥集市 App 里的账号密码，不是你学校教务系统的；\n"
+                            + "· 一直用微信一键登录、从没设过密码的账号，这条路走不通 —— "
+                            + "改用抓包，或找已经抓过的同学要一个 token。");
+                }
+                throw new IOException2("服务端拒绝了：" + msg);
+            }
+            throw new IOException2(errnoText(errno, msg));
+        }
+
+        String tk = extractToken(r);
+        if (!tokenLooksOk(tk)) {
+            throw new IOException2("登录接口返回成功，但 resp 里没找到 token。"
+                    + "把这条反馈给作者：resp=" + r.toString().substring(0, Math.min(300, r.toString().length())));
+        }
+        return tk;
+    }
+
+    /** 60 字符 base64 才算真 token（服务端多一个字符就 errno 20） */
+    static boolean tokenLooksOk(String t) {
+        if (t == null || t.length() != 60) return false;
+        for (int i = 0; i < t.length(); i++) {
+            char c = t.charAt(i);
+            boolean b64 = (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z')
+                    || (c >= '0' && c <= '9') || c == '+' || c == '/' || c == '=';
+            if (!b64) return false;
+        }
+        return true;
+    }
+
+    /** 登录返回体里 token 的字段名各家不一，按可能性依次取 */
+    private static String extractToken(JSONObject r) {
+        String[] keys = {"user_token", "token", "access_token", "accessToken", "usertoken"};
+        JSONObject d = dataObj(r);
+        if (d != null) {
+            for (String k : keys) {
+                String v = d.optString(k, "");
+                if (v.length() > 0) return v.trim();
+            }
+            Object raw = d.opt("data");
+            if (raw instanceof String) return ((String) raw).trim();
+        }
+        Object dv = r.opt("data");
+        if (dv instanceof String) return ((String) dv).trim();
+        for (String k : keys) {
+            String v = r.optString(k, "");
+            if (v.length() > 0) return v.trim();
+        }
+        return "";
+    }
+
+    /**
+     * 拉一段纯文本（给「从链接导入 token」用：作者把自己的 token 放 GitHub Gist / raw 文件，
+     * 零基础同学只要粘贴一个网址就能拿到 token，不用抓包）。
+     * 只认 http/https，10 秒超时，最多读 8KB。
+     */
+    public static String fetchText(String url) throws Exception {
+        String u = url == null ? "" : url.trim();
+        if (!u.toLowerCase().startsWith("http://") && !u.toLowerCase().startsWith("https://")) {
+            throw new IOException2("链接要以 http:// 或 https:// 开头");
+        }
+        HttpURLConnection c = null;
+        try {
+            c = (HttpURLConnection) new URL(u).openConnection();
+            c.setConnectTimeout(10000);
+            c.setReadTimeout(15000);
+            c.setRequestProperty("User-Agent", "okhttp/4.10.0");
+            int code = c.getResponseCode();
+            if (code != 200) throw new IOException2("HTTP " + code + "（链接打不开，确认是公开可访问的 raw 地址）");
+            InputStream in = c.getInputStream();
+            ByteArrayOutputStream bos = new ByteArrayOutputStream();
+            byte[] buf = new byte[4096];
+            int n;
+            while ((n = in.read(buf)) > 0 && bos.size() < 8192) bos.write(buf, 0, n);
+            in.close();
+            return bos.toString("UTF-8");
+        } finally {
+            if (c != null) c.disconnect();
+        }
     }
 
     // ---------------------------------------------------------------- 接口

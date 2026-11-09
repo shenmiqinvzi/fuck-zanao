@@ -46,11 +46,11 @@ v1.3 的取舍：
 ---
 
 ## 装哪个
-`dist/zanao_hot_1.3.4.apk`（387,384 字节，**不带 token 版**）—— 自签名，装之前要允许「安装未知来源应用」。
+`dist/zanao_hot_1.4.0.apk`（391,477 字节，**不带 token 版**）—— 自签名，装之前要允许「安装未知来源应用」。
 
-- 包名 `com.zanao.hot`，versionCode 8 / versionName 1.3.4（在 1.3.3 基础上新增**设置页内置「怎么拿到 token」图文步骤**；签名为新证书，从更早的自带 token 版本升级要先卸载，1.3.3 可直接覆盖装）
+- 包名 `com.zanao.hot`，versionCode 9 / versionName 1.4.0（在 1.3.4 基础上新增**两条免抓包通道**：账号密码登录、从链接导入 token；首次启动有引导，导入/登录成功会回填输入框；网络错误翻成人话；签名与 1.3.3/1.3.4 相同，可直接覆盖装）
 - 旧版 `dist/zanao_hot_1.2.apk`（383,286 字节）versionCode 3 / 1.2（保活 + 搜索），留着备用
-- 已在 **Android 14 x86_64 模拟器**上跑通全链路（实时热榜 · 掉榜追踪 · 1061 帖 / 5256 评论 · 三个页签 · 详情页 · 离线 · 定时 · 导出 · 导入）
+- 已在 **Android 14 x86_64 模拟器**上跑通全链路（实时热榜 · 掉榜追踪 · 1061 帖 / 5256 评论 · 三个页签 · 详情页 · 离线 · 定时 · 导出 · 导入 · 账号密码登录 · 链接导入）
 
 **注意**：仓库里的 APK 是**不带 token** 的版本（见下面「token」一节），装上后要在设置页填自己的 token 才能抓。
 
@@ -61,7 +61,9 @@ v1.3 的取舍：
 | 实时热榜 | [`docs/screenshots/70_v4_hot.png`](docs/screenshots/70_v4_hot.png) | 最新一轮在榜：rank 徽标、标题、热度 / 浏览 / 评论 / 赞（历史期数页签已随 v1.3 去分期移除） |
 | 全部帖 | [`docs/screenshots/73_v4_all.png`](docs/screenshots/73_v4_all.png) | 时间流，按发帖时间倒序，只显示上过热榜的帖子（v1.3.1 过滤掉从未上榜的历史帖） |
 | 帖子存档 | [`docs/screenshots/74_v4_detail.png`](docs/screenshots/74_v4_detail.png) | 正文 + 作者 + 浏览/赞/收藏/评论 + 名次轨迹 |
-| 设置 | [`docs/screenshots/90_settings_token.png`](docs/screenshots/90_settings_token.png) | token（60 字符校验）、抓取间隔（默认 15 / 最小 5）；蓝色那行点开就是内置的取 token 步骤 [`docs/screenshots/91_token_help.png`](docs/screenshots/91_token_help.png) |
+| 设置 | [`docs/screenshots/90_settings_token.png`](docs/screenshots/90_settings_token.png) | token（60 字符校验）、抓取间隔（默认 15 / 最小 5）；下面三行蓝字分别是「抓包步骤」[`91_token_help.png`](docs/screenshots/91_token_help.png)、「账号密码登录」、「从链接导入 token」（后两条是 v1.4.0 的免抓包通道） |
+| 账号密码登录 | [`docs/screenshots/92_login_account.png`](docs/screenshots/92_login_account.png) | 填赞奥账号密码换 token，成功即回填并抓一轮（路径 A） |
+| 从链接导入 | [`docs/screenshots/93_token_from_url.png`](docs/screenshots/93_token_from_url.png) | 粘一个存着 token 的公开网址，自动识别纯文本 / JSON（路径 B） |
 
 ---
 
@@ -71,14 +73,51 @@ v1.3 的取舍：
 
 两种填法：
 
-1. **装好后填**：进 App → 设置 → 粘贴 token → 保存（**必须是 60 字符**，少/多一个字符都会报 errno 20，保存时会被拦下）。
+1. **装好后填**：进 App → 设置 → 粘贴 token → 保存（**必须是 60 字符**，少/多一个字符都会报 errno 20，保存时会被拦下）。也行用设置页里的「账号密码登录」/「从链接导入」自动填，见下面路径 A / B。
 2. **构建时编进去**：`.\build.ps1 -Token "你的token"`，脚本会把 token 写进临时资源目录再打包，不改源码。
 
-token 从哪来：**抓一次官方 App 的请求，抄 `X-Sc-Token` 请求头**。
+token 从哪来：v1.4.0 起有三条路，**优先用前两条，不用抓包**。
+
+### 路径 A：账号密码登录（v1.4.0，无需抓包）
+
+设置 → 「🔑 不想抓包？账号密码登录」→ 填赞奥集市的账号（手机号或用户名）+ 密码 → 登录成功后 token 自动写入并立刻抓一轮。
+
+底层就是 `POST /user/loginpost`（`application/x-www-form-urlencoded`，`username` + `password`，签名与其他接口同一套）。
+
+- 只对**设过密码**的账号有用；一直是微信一键登录、从没设过密码的账号会返回「用户名或密码错误」，这是官方行为，不是本 App 的问题。
+- 登录失败的错误文案是人话版，讲清了「要的是赞奥的密码，不是教务系统的」。
+
+### 路径 B：从链接导入（v1.4.0，把 token 分发出去）
+
+设置 → 「🔗 从链接导入 token」→ 粘一个存着 token 的公开网址（Gist raw / 仓库 txt / 自建服务器都行）→ 点「获取」。
+
+- 纯文本、`X-Sc-Token: xxx`、JSON 里的 `user_token` / `token` / `access_token` 字段都能自动认出来；`%3D`、引号、空格、换行会自动清理。
+- 适合「一个人抓包、整个群分发」：把 txt 换成新 token，其他人重新点一次「获取」即可。
+- ⚠️ 谁拿到这个网址就等于拿到那个账号的登录态，别放公开主页。
+
+### 路径 C：抓包（兜底，5 分钟）
 
 - 手机端最省事：Reqable / HttpCanary（小黄鸟）/ Stream 开抓包 → 打开赞奥 App 刷一次热榜 → 在 `api.app.zanao.com` 的请求头里复制 `X-Sc-Token`（60 字符）。**不用 root。**
 - 电脑端兜底：手机和电脑同一 WiFi，手机代理指向电脑 `8080`，跑 `mitmproxy`，选中请求看 Headers。**这个接口是 `http` 明文，不用装证书**（好多教程写 https 装证书那套在这儿是多余的）。
 - 逐步图文（含常见抓不到的排查）：[docs/零基础使用指南.md](docs/零基础使用指南.md) 第 3 节；App 设置页那行蓝字也是同一份说明。
+
+### 为什么没有「手机号一键登录」（2026-11 实测）
+
+用复刻签名的直连客户端逐条打过官方接口，结论：
+
+| 探测 | 结果 |
+| --- | --- |
+| `POST /user/loginpost`（username/password） | `errno 10 用户名或密码错误` —— 只认账号密码，带不带 smscode 都一样 |
+| `POST /user/loginpost` 加 `smscode` 字段 | 同上，**没有短信码分支** |
+| `POST /user/applogin`（code=dummy） | `errno 10 code非法` —— 只认微信授权 code |
+| `POST /app/devicereg`（device=…） | `errno 10 regId非法` —— 只注册推送设备，不签发用户 token |
+| `/thread/hot` 带空 token / 假 token | `errno 20 登录中…` —— **没有游客数据**，token 硬性必需 |
+| 官方登录页 JS（`assets/prod/static-v2/js/entry.ac83e065.js`）文案 | 只有「微信登录 / 微信授权登录 / 账号登录 / 第三方登录」 |
+| `assets/prod/static-v3/js/index-*.js` | 微信小程序包（wxPay、chooseImage、「请在微信中打开」） |
+| `/sms/codesend`、`/sms/codeverify` | 属于 `/tutor-api` **家教子系统**，与校园集市登录无关 |
+
+即：官方只有**微信授权**和**用户名+密码**两种登录，没有手机号+短信验证码登录集市的通道；
+微信授权码由微信开放平台按「包名 + 签名」下发，重打包的第三方 APK 注定拿不到。所以 v1.4.0 只能做路径 A / B。
 
 token 形态：URL-safe base64，固定 **60 字符**，结尾可能是 `=`。原样贴或 URL 编码都行，**双重编码会挂**（errno 20）。
 

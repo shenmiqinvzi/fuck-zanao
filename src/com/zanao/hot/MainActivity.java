@@ -51,6 +51,8 @@ public class MainActivity extends Activity {
     static final String KEY_TOKEN_MANUAL = "token_manual";
     /** 内置 token 的合法长度：服务端只认 60 字符 base64，多一个字符就 errno 20 */
     static final int TOKEN_LEN = 60;
+    /** v1.4.0：首次启动的 token 引导只弹一次 */
+    static final String KEY_WELCOME = "welcome_shown";
 
     private static final int PAGE = 50;
 
@@ -64,6 +66,9 @@ public class MainActivity extends Activity {
     private TextView status;
     private ScrollView sv;
     private ExecutorService pool = Executors.newFixedThreadPool(2);
+
+    /** 设置弹窗里 token 输入框的引用：登录/导入成功后就地回填，免得用户以为没生效 */
+    private EditText tokenEt;
     private Handler ui = new Handler(Looper.getMainLooper());
     private long loadedBefore = 0;     // 已渲染到的最老 posted_at（全部帖页签用）
     private boolean loading = false;
@@ -89,8 +94,38 @@ public class MainActivity extends Activity {
             // v5：启动前台保活服务（ROM 杀后台的对策）
             KeepAliveService.ensure(this);
             // v5：没进电池白名单就弹一次引导（每次打开 App 最多提醒一次）
-            maybeBatteryGuide();
+            // v1.4.0：还没 token 时先别弹——盲抓也抓不到数据，只会把登录引导盖掉
+            if (tokenOk(token())) maybeBatteryGuide();
         }
+        // v1.4.0：没有 token 的新用户第一次打开 → 直接给三条能走的路，别让人对着空表格发呆
+        SharedPreferences sp0 = getSharedPreferences(PREF, MODE_PRIVATE);
+        if (!tokenOk(token()) && !sp0.getBoolean(KEY_WELCOME, false)) {
+            sp0.edit().putBoolean(KEY_WELCOME, true).apply();
+            showWelcome();
+        }
+    }
+
+    /** v1.4.0：首次启动的三选一（账号登录 / 抓包 / 链接导入） */
+    private void showWelcome() {
+        new AlertDialog.Builder(this)
+                .setTitle("第一次用：先拿到 token")
+                .setMessage("赞奥的接口不给游客数据，没有 token 什么都刷不出来（服务端直接回 errno 20「登录中...」）。\n\n"
+                        + "三条路，从易到难：\n"
+                        + "① 账号密码登录 —— 记得自己在赞奥的密码就用这个，输一次就好\n"
+                        + "② 从链接导入 —— 别人给你一个网址（里面存着 token），粘进来自动取\n"
+                        + "③ 自己抓包 —— 5 分钟，图文步骤在设置页里\n\n"
+                        + "注意：手机号 + 短信验证码登录不存在（官方只有微信授权和账号密码两种），"
+                        + "微信授权码又绑死了官方包名和签名，第三方 APK 拿不到 —— 所以别找「一键登录」。")
+                .setPositiveButton("账号密码登录", new DialogInterface.OnClickListener() {
+                    public void onClick(DialogInterface d, int w) { showAccountLogin(); }
+                })
+                .setNeutralButton("从链接导入", new DialogInterface.OnClickListener() {
+                    public void onClick(DialogInterface d, int w) { showImportFromUrl(); }
+                })
+                .setNegativeButton("看抓包步骤", new DialogInterface.OnClickListener() {
+                    public void onClick(DialogInterface d, int w) { showTokenHelp(); }
+                })
+                .show();
     }
 
     /** 电池优化白名单引导：不在白名单里时弹提示，点「去设置」跳系统授权框 */
@@ -141,6 +176,28 @@ public class MainActivity extends Activity {
             if (!b64) return false;
         }
         return true;
+    }
+
+    /**
+     * v1.4.0：从抓包工具 / 微信 / 记事本里复制出来的 token 常带脏东西——
+     * 前后引号、空格换行、`X-Sc-Token:` 前缀、URL 编码出来的 %3D、`Bearer ` 前缀。
+     * 不洗一遍就直接判「必须是 60 字符」，用户会以为自己拿的 token 是错的。
+     */
+    static String cleanToken(String raw) {
+        if (raw == null) return "";
+        String t = raw;
+        int i = t.indexOf("X-Sc-Token");
+        if (i >= 0) t = t.substring(i + "X-Sc-Token".length());
+        t = t.replace("\"", "").replace("'", "").replace("`", "")
+                .replace(" ", "").replace("\t", "").replace("\r", "").replace("\n", "");
+        while (t.startsWith(":")) t = t.substring(1);
+        if (t.toLowerCase().startsWith("token=")) t = t.substring(6);
+        if (t.regionMatches(true, 0, "Bearer", 0, 6)) t = t.substring(6);
+        // URL 编码还原：base64 里只有 = + / 会变成 %3D %2B %2F
+        t = t.replace("%3D", "=").replace("%3d", "=")
+                .replace("%2B", "+").replace("%2b", "+")
+                .replace("%2F", "/").replace("%2f", "/");
+        return t;
     }
 
     /**
@@ -745,7 +802,7 @@ public class MainActivity extends Activity {
                 } catch (final Exception e) {
                     ui.post(new Runnable() {
                         public void run() {
-                            status.setText("抓取失败：" + e.getMessage());
+                            status.setText("抓取失败：" + friendlyErr(e));
                         }
                     });
                 }
@@ -919,7 +976,7 @@ public class MainActivity extends Activity {
 
         TextView hint = new TextView(this);
         hint.setText("token 必须是 60 字符 base64（长度差一个就报 errno 20「登录中...」）。"
-                + "APK 内置 token 优先；只有在这里手填且长度合法才会覆盖它。"
+                + "粘贴时带引号、空格换行、X-Sc-Token: 前缀或 %3D 都不要紧，保存时会自动清理。"
                 + "社区别名固定 zzu（大小写敏感，改错报 errno 30）。");
         hint.setTextSize(12);
         hint.setTextColor(0xFF666666);
@@ -929,6 +986,7 @@ public class MainActivity extends Activity {
         et.setInputType(InputType.TYPE_CLASS_TEXT);
         et.setText(token());
         et.setHint("X-Sc-Token（60 字符 base64）");
+        tokenEt = et;
         box.addView(et);
 
         // v1.3.4：零基础用户不知道 token 从哪来，给一条能点的图文步骤入口
@@ -943,6 +1001,31 @@ public class MainActivity extends Activity {
             }
         });
         box.addView(tlink);
+
+        // v1.4.0：两条免抓包的路（账号密码登录 / 别人给个链接）
+        TextView alink = new TextView(this);
+        alink.setText("🔑 不想抓包？账号密码登录");
+        alink.setTextSize(13);
+        alink.setTextColor(0xFF1976D2);
+        alink.setPadding(0, dp(2), 0, dp(2));
+        alink.setOnClickListener(new View.OnClickListener() {
+            public void onClick(View v) {
+                showAccountLogin();
+            }
+        });
+        box.addView(alink);
+
+        TextView ulink = new TextView(this);
+        ulink.setText("🔗 从链接导入 token（同学给你一个网址）");
+        ulink.setTextSize(13);
+        ulink.setTextColor(0xFF1976D2);
+        ulink.setPadding(0, dp(2), 0, dp(8));
+        ulink.setOnClickListener(new View.OnClickListener() {
+            public void onClick(View v) {
+                showImportFromUrl();
+            }
+        });
+        box.addView(ulink);
 
         TextView ivHint = new TextView(this);
         ivHint.setText("\n自动抓取间隔（分钟，最小 " + AutoReceiver.MIN_INTERVAL + "）：");
@@ -969,14 +1052,16 @@ public class MainActivity extends Activity {
                 .setView(box)
                 .setPositiveButton("保存", new DialogInterface.OnClickListener() {
                     public void onClick(DialogInterface d, int w) {
-                        String t = et.getText().toString().trim();
+                        // v1.4.0：先洗掉引号 / 空格 / X-Sc-Token: 前缀 / %3D 转义，再判长度
+                        String t = cleanToken(et.getText().toString());
                         String builtin = getString(R.string.default_token);
                         if (builtin == null) builtin = "";
                         boolean manual = !t.equals(builtin.trim());
                         if (manual && !tokenOk(t)) {
                             Toast.makeText(MainActivity.this,
                                     "token 必须是 60 字符 base64（现在 " + t.length()
-                                            + " 字符），没保存", Toast.LENGTH_LONG).show();
+                                            + " 字符；空格引号和 %3D 已经自动处理过），没保存",
+                                    Toast.LENGTH_LONG).show();
                             return;
                         }
                         sp.edit().putString(KEY_TOKEN, t)
@@ -1096,6 +1181,208 @@ public class MainActivity extends Activity {
                 .setView(sv)
                 .setPositiveButton("知道了", null)
                 .show();
+    }
+
+    /**
+     * v1.4.0：账号密码登录 —— 直接 POST /user/loginpost 换 token，用户完全不用抓包。
+     *
+     * 为什么这条路存在：官方登录页本身就有「账号登录 / 用户名 / 密码 / 手机号」这套文案
+     * （assets/prod/static-v2/js/entry.*.js），说明服务端支持账号密码登录；
+     * 2026-11-09 直连实测返回 errno 10「用户名或密码错误」→ 端口活着，签名也过了。
+     * 唯一限制：账号得真的设过密码。一直用微信一键登录的人没有密码，只能走抓包/转发。
+     */
+    /** v1.4.0：把 Java 网络异常翻译成人话，零基础用户看得懂 */
+    static String friendlyErr(Throwable e) {
+        if (e == null) return "未知错误";
+        String m = e.getMessage() == null ? "" : e.getMessage();
+        if (m.contains("Failed to connect") || m.contains("ECONNREFUSED")
+                || e instanceof java.net.ConnectException) {
+            return "连不上这个地址：对方服务没开、网址写错，或者手机正走代理没通。\n"
+                    + "（原文：" + m + "）";
+        }
+        if (m.contains("Unable to resolve host") || e instanceof java.net.UnknownHostException) {
+            return "域名解析不了：网址抄错了，或者当前网络（校园网/代理）拦了它。\n"
+                    + "（原文：" + m + "）";
+        }
+        if (m.contains("timed out") || m.contains("timeout")) {
+            return "连上了但一直没回数据（超时）：换个网络再试，或确认那个链接还能打开。\n"
+                    + "（原文：" + m + "）";
+        }
+        if (m.contains("HTTP 404")) return "这个网址不存在（404），检查路径是不是少了一截。";
+        if (m.contains("HTTP 403")) return "对方拒绝访问（403），链接可能需要登录或权限。";
+        if (m.contains("HTTP ") && m.contains("Permission")) return "没网（检查流量/WiFi 是否可用）。";
+        return m.length() == 0 ? e.toString() : m;
+    }
+
+    private void showAccountLogin() {
+        final SharedPreferences sp = getSharedPreferences(PREF, MODE_PRIVATE);
+
+        LinearLayout box = new LinearLayout(this);
+        box.setOrientation(LinearLayout.VERTICAL);
+        box.setPadding(dp(16), dp(8), dp(16), dp(8));
+
+        TextView hint = new TextView(this);
+        hint.setText("填你在赞奥集市登录用的账号。登录成功后 token 自动存好，以后不用再管。\n"
+                + "· 账号可以是手机号，也可以是用户名（试一下就知道）；\n"
+                + "· 密码是赞奥的密码，不是教务系统的；\n"
+                + "· 一直是微信一键登录、从没设过密码的账号 → 用不了这个，回上一页走抓包。");
+        hint.setTextSize(12);
+        hint.setTextColor(0xFF666666);
+        box.addView(hint);
+
+        final EditText user = new EditText(this);
+        user.setInputType(InputType.TYPE_CLASS_TEXT);
+        user.setHint("手机号 / 用户名");
+        box.addView(user);
+
+        final EditText pwd = new EditText(this);
+        pwd.setInputType(InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_VARIATION_PASSWORD);
+        pwd.setHint("密码");
+        box.addView(pwd);
+
+        new AlertDialog.Builder(this)
+                .setTitle("账号密码登录")
+                .setView(box)
+                .setPositiveButton("登录", new DialogInterface.OnClickListener() {
+                    public void onClick(DialogInterface d, int w) {
+                        final String u = user.getText().toString().trim();
+                        final String p = pwd.getText().toString();
+                        if (u.length() == 0 || p.length() == 0) {
+                            Toast.makeText(MainActivity.this, "账号和密码都要填", Toast.LENGTH_SHORT).show();
+                            return;
+                        }
+                        Toast.makeText(MainActivity.this, "正在登录…", Toast.LENGTH_SHORT).show();
+                        pool.execute(new Runnable() {
+                            public void run() {
+                                try {
+                                    final String tk = Api.loginAccount(u, p);
+                                    ui.post(new Runnable() {
+                                        public void run() {
+                                            sp.edit().putString(KEY_TOKEN, tk)
+                                                    .putBoolean(KEY_TOKEN_MANUAL, true).apply();
+                                            if (tokenEt != null) tokenEt.setText(tk);
+                                            Toast.makeText(MainActivity.this,
+                                                    "登录成功，token 已保存", Toast.LENGTH_SHORT).show();
+                                            reload();
+                                            refresh();
+                                        }
+                                    });
+                                } catch (final Exception e) {
+                                    ui.post(new Runnable() {
+                                        public void run() {
+                                            new AlertDialog.Builder(MainActivity.this)
+                                                    .setTitle("登录失败")
+                                                    .setMessage(friendlyErr(e))
+                                                    .setPositiveButton("知道了", null)
+                                                    .show();
+                                        }
+                                    });
+                                }
+                            }
+                        });
+                    }
+                })
+                .setNegativeButton("取消", null)
+                .show();
+    }
+
+    /**
+     * v1.4.0：从链接导入 token —— 给"分发"用。
+     * 作者抓一次包，把 token 存进 Gist / 仓库里的 raw 文本；同学粘贴这个网址，
+     * App 拉下来自动填好。这样不会写代码的人也不用抓包、不用认识请求头。
+     */
+    private void showImportFromUrl() {
+        final SharedPreferences sp = getSharedPreferences(PREF, MODE_PRIVATE);
+
+        LinearLayout box = new LinearLayout(this);
+        box.setOrientation(LinearLayout.VERTICAL);
+        box.setPadding(dp(16), dp(8), dp(16), dp(8));
+
+        TextView hint = new TextView(this);
+        hint.setText("粘贴一个公开可访问的网址，里面存着 token（可以是纯文本，也可以是 JSON 里的 token 字段）。\n"
+                + "常见做法：把 token 写进 GitHub Gist 的 raw 链接 / 仓库里的一个 txt。\n"
+                + "⚠️ 任何人拿到这个链接就等于拿到你的账号，别放公开主页上。");
+        hint.setTextSize(12);
+        hint.setTextColor(0xFF666666);
+        box.addView(hint);
+
+        final EditText url = new EditText(this);
+        url.setInputType(InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_VARIATION_URI);
+        url.setHint("https://gist.githubusercontent.com/.../token.txt");
+        box.addView(url);
+
+        new AlertDialog.Builder(this)
+                .setTitle("从链接导入 token")
+                .setView(box)
+                .setPositiveButton("获取", new DialogInterface.OnClickListener() {
+                    public void onClick(DialogInterface d, int w) {
+                        final String u = url.getText().toString().trim();
+                        if (u.length() == 0) return;
+                        Toast.makeText(MainActivity.this, "正在获取…", Toast.LENGTH_SHORT).show();
+                        pool.execute(new Runnable() {
+                            public void run() {
+                                String err = null;
+                                String tk = "";
+                                try {
+                                    String body = Api.fetchText(u);
+                                    tk = parseTokenFromText(body);
+                                    if (!tokenOk(tk)) {
+                                        err = "拉下来的内容里没有 60 字符的 token：\n"
+                                                + body.substring(0, Math.min(200, body.length()));
+                                    }
+                                } catch (Exception e) {
+                                    err = friendlyErr(e);
+                                }
+                                final String ferr = err;
+                                final String ftk = tk;
+                                ui.post(new Runnable() {
+                                    public void run() {
+                                        if (ferr != null) {
+                                            new AlertDialog.Builder(MainActivity.this)
+                                                    .setTitle("获取失败").setMessage(ferr)
+                                                    .setPositiveButton("知道了", null).show();
+                                            return;
+                                        }
+                                        sp.edit().putString(KEY_TOKEN, ftk)
+                                                .putBoolean(KEY_TOKEN_MANUAL, true).apply();
+                                        if (tokenEt != null) tokenEt.setText(ftk);
+                                        Toast.makeText(MainActivity.this,
+                                                "token 已导入", Toast.LENGTH_SHORT).show();
+                                        reload();
+                                        refresh();
+                                    }
+                                });
+                            }
+                        });
+                    }
+                })
+                .setNegativeButton("取消", null)
+                .show();
+    }
+
+    /** 从任意文本里捞 60 字符 token：先找 "token":"xxx"，再逐行净化试 */
+    static String parseTokenFromText(String body) {
+        if (body == null) return "";
+        int i = body.indexOf("\"");
+        String[] keys = {"\"user_token\"", "\"token\"", "\"access_token\""};
+        for (String k : keys) {
+            int at = body.indexOf(k);
+            if (at < 0) continue;
+            int q1 = body.indexOf('"', at + k.length() + 1);
+            int colon = body.indexOf(':', at + k.length());
+            if (colon < 0) continue;
+            int q2 = body.indexOf('"', colon + 1);
+            if (q2 < 0) continue;
+            int q3 = body.indexOf('"', q2 + 1);
+            if (q3 < 0) continue;
+            String v = cleanToken(body.substring(q2 + 1, q3));
+            if (tokenOk(v)) return v;
+        }
+        for (String line : body.split("[\\r\\n]+")) {
+            String v = cleanToken(line);
+            if (tokenOk(v)) return v;
+        }
+        return "";
     }
 
     @Override
