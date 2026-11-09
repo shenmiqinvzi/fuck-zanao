@@ -931,6 +931,19 @@ public class MainActivity extends Activity {
         et.setHint("X-Sc-Token（60 字符 base64）");
         box.addView(et);
 
+        // v1.3.4：零基础用户不知道 token 从哪来，给一条能点的图文步骤入口
+        TextView tlink = new TextView(this);
+        tlink.setText("👉 不知道 token 从哪来？点这里看 5 分钟抓包步骤");
+        tlink.setTextSize(13);
+        tlink.setTextColor(0xFF1976D2);
+        tlink.setPadding(0, dp(6), 0, dp(6));
+        tlink.setOnClickListener(new View.OnClickListener() {
+            public void onClick(View v) {
+                showTokenHelp();
+            }
+        });
+        box.addView(tlink);
+
         TextView ivHint = new TextView(this);
         ivHint.setText("\n自动抓取间隔（分钟，最小 " + AutoReceiver.MIN_INTERVAL + "）：");
         ivHint.setTextSize(12);
@@ -1039,6 +1052,49 @@ public class MainActivity extends Activity {
                     }
                 })
                 .setNegativeButton("关闭", null)
+                .show();
+    }
+
+    /** v1.3.4：零基础取 token 的图文步骤（手机抓包为主，电脑抓包兜底） */
+    private void showTokenHelp() {
+        String t = "【token 是什么】\n"
+                + "你在赞奥 App 里的登录凭证，固定 60 个字符（字母数字，末尾可能是 =）。"
+                + "本应用不存账号密码，只用这一串代表你，所以得自己抓一次。\n\n"
+                + "【手机抓包（不用 root，约 5 分钟）】\n"
+                + "1. 应用商店搜「Reqable」或「HttpCanary / 小黄鸟」，装上打开。\n"
+                + "2. 点「开始抓包」→ 系统问是否允许创建 VPN 连接 → 点允许。\n"
+                + "   （这是本机抓自己，不翻墙、不改变你正常上网。）\n"
+                + "3. 回桌面打开「赞奥」App → 进校园集市 → 点一次热榜或下拉刷新。\n"
+                + "4. 切回抓包工具 → 搜索框输 zanao → 找到 api.app.zanao.com 的请求，"
+                + "点开任意一条。\n"
+                + "5. 看「请求头 / Request Headers」→ 复制 X-Sc-Token 后面那一整串"
+                + "（60 字符，别带空格和换行）。\n"
+                + "6. 抓完把抓包关掉，省电。\n\n"
+                + "【电脑抓（手机上装不上工具时）】\n"
+                + "手机和电脑连同一个 WiFi → 手机 WiFi 设置里把代理改成手动："
+                + "主机填电脑内网 IP，端口 8080 → 电脑上跑 mitmproxy → 手机打开赞奥 App 刷新热榜 → "
+                + "电脑窗口里按 / 搜 zanao → 选中请求，右边 Headers 里复制 X-Sc-Token。"
+                + "这个接口是 http 明文，不用装证书。\n\n"
+                + "【拿到之后】\n"
+                + "粘到上一个对话框的输入框 → 保存 → 回首页点刷新。"
+                + "出现 10 条热榜就成功了；提示 errno 20 就是串不对（多打或少打了一个字符）。\n\n"
+                + "【注意】\n"
+                + "· token 等于你赞奥账号的钥匙，别发群里、别截图带出去；"
+                + "失效了就重新抓一次。\n"
+                + "· 别拿别人的 token 用，请求会计在人家账号上。\n"
+                + "· 抓取间隔 15 分钟足够，别调太猛。";
+        TextView tv = new TextView(this);
+        tv.setText(t);
+        tv.setTextSize(13);
+        tv.setLineSpacing(dp(3), 1f);
+        tv.setTextIsSelectable(true);
+        ScrollView sv = new ScrollView(this);
+        sv.setPadding(dp(16), dp(8), dp(16), dp(8));
+        sv.addView(tv);
+        new AlertDialog.Builder(this)
+                .setTitle("怎么拿到 token")
+                .setView(sv)
+                .setPositiveButton("知道了", null)
                 .show();
     }
 
