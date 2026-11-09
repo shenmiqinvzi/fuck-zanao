@@ -59,7 +59,7 @@ header `X-Sc-Ah` 的生成，5 步：
 
 ## 4. Token 获取与更新（运维约定）
 
-- 电脑侧已有 Python 全套（`F:\待破解\zanao\`）：direct_client.py / zanao_hot.py / zanao_crawler.py / zanao_hot_loop.py / show_comments.py；token 现存 `F:\待破解\zanao\token.txt`。
+- 电脑侧已有 Python 全套（`（工作目录）\`）：direct_client.py / zanao_hot.py / zanao_crawler.py / zanao_hot_loop.py / show_comments.py；token 现存 `（工作目录）\token.txt`。
 - 电脑每小时任务（Windows 计划程序 ZanaoHotCrawler）继续跑，与 App 互为独立采集腿，互不依赖。
 - token 失效时：电脑 mitm+雷电模拟器走微信授权（splash「微信登录」按钮 → 授权 → 选择学校）拿新 token → 用户粘贴进 App。
 - App 首启：设置页粘贴 token（默认 alias=zzu），即可开始采集。
@@ -141,7 +141,7 @@ CREATE TABLE comment_snap(
 
 ## 8. 签名验证用例（移植后必跑）
 
-- 电脑端 Python 参考实现：`F:\待破解\zanao\zc.py`（make_sign）/ `sign_final5.py` / `verify_flows2.py`（20/20 真实流量全过）。
+- 电脑端 Python 参考实现：`（工作目录）\zc.py`（make_sign）/ `sign_final5.py` / `verify_flows2.py`（20/20 真实流量全过）。
 - 验证法：Java 实现对同一组 (map, randnum__, timestamp__) 输出与 Python 完全一致的 X-Sc-Ah；再用真实请求直连 api.app.zanao.com 得 errno 0 即通过。
 - device_id 沿用 `00000000-53ef-1f0d-ffff-ffffef05ac4a-345076e6d5406f4f`；reg_id 用 `xNBWgHgHM8dJ4wu2ALucsBCKbLe/8xJq8BcxjFG4nCVBreewXb/M5WrfLBN6HUI4`（devicereg 场景才需要，App 纯读可以不带）。
 
@@ -157,7 +157,7 @@ CREATE TABLE comment_snap(
 2. **M2（1 天）**：UI 三页 + SQLite 存档 + WorkManager 定时 + 通知。
 3. **M3（半天）**：图片本地化 + token 设置页 + 打包签名交付。
 
-## 附：电脑侧资产索引（F:\待破解\zanao\）
+## 附：电脑侧资产索引（（工作目录）\）
 
 - direct_client.py（直连+签名客户端，可当接口调试器）
 - zanao_hot.py / zanao_hot_loop.py（热榜单轮/循环爬虫，hot.db）

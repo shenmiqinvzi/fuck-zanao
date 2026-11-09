@@ -1,7 +1,7 @@
 import com.zanao.hot.Sign;
 import java.util.TreeMap;
 
-/** 桌面 JVM 单测：11 条签名用例，期望值与 F:\待破解\zanao\sign_final5.py 完全一致 */
+/** 桌面 JVM 单测：11 条签名用例，期望值与 （工作目录）\sign_final5.py 完全一致 */
 public class SignTest {
 
     private static int pass = 0;

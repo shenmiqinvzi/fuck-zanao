@@ -2,8 +2,8 @@
 
 > 评审时间：2026-10-31 15:3x（Asia/Shanghai）
 > 评审方式：不是读文档，是**拿文档当假设逐条打真接口验证**（全部 `http://api.app.zanao.com`，用自实现 makeSign 直连，errno 0 为通过）；打包章节在真机上跑完整工具链验证。
-> 被评审文件：`F:\待破解\zanao\热榜App设计文档.md`（167 行，v1.2）
-> 验证脚本：`F:\待破解\zanao\_live_verify4.py` ~ `_live_verify13.py`、`_header_probe.py`
+> 被评审文件：`（工作目录）\热榜App设计文档.md`（167 行，v1.2）
+> 验证脚本：`（工作目录）\_live_verify4.py` ~ `_live_verify13.py`、`_header_probe.py`
 
 ---
 
@@ -68,12 +68,12 @@ http://api.app.zanao.com   → errno 0
 
 ```
 aapt2. W ... AssetsProvider.cpp:114] Failed to stat file
-  'F:\待破解\zanao\_sdk\platform\android-UpsideDownCake\android.jar': No such file or directory
+  '（工作目录）\_sdk\platform\android-UpsideDownCake\android.jar': No such file or directory
 ```
 
-`F:\待破解\` 里的"待破解"三个汉字让 aapt2 的 Windows 路径处理挂掉。**exit code 还是 0**，只是产物缺资源——最难查的那类失败。工程目录在 `F:\待破解\zanao\` 下，必然踩。
+中文目录名让 aapt2 的 Windows 路径处理挂掉。**exit code 还是 0**，只是产物缺资源——最难查的那类失败。
 
-→ 文档必须写明：**SDK 与工程一律放纯 ASCII 路径**（实测 `C:\Users\LENOVO\AppData\Local\dsh_android\` 一切正常）。这条不写进去，下一个人会在这里耗半天。
+→ 文档必须写明：**SDK 与工程一律放纯 ASCII 路径**（实测 `C:\android-sdk\` 一切正常）。这条不写进去，下一个人会在这里耗半天。
 
 ### P0-5 §2 line 30：`type` 不是"榜单类型"，是**字段丰富度开关**；省略或 `type=1` 会退化成 8 字段精简版
 
@@ -244,7 +244,7 @@ page / offset / start / p / last_rank / rank / from_rank **全部无效**，加�
 
 ### M-8 §8 引用的 `zc.py` 不存在
 
-`F:\待破解\zanao\zc.py` **没有这个文件**（其余 15 个资产全在）。§8 line 144 拿它当 Python 参考实现 → 失效引用。改成 `direct_client.py`（含 call() 直连+签名，可直接当接口调试器）/ `sign_final5.py`（11 条签名用例）。
+`（工作目录）\zc.py` **没有这个文件**（其余 15 个资产全在）。§8 line 144 拿它当 Python 参考实现 → 失效引用。改成 `direct_client.py`（含 call() 直连+签名，可直接当接口调试器）/ `sign_final5.py`（11 条签名用例）。
 
 ### M-9 附录数据过期
 
